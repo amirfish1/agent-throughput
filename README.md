@@ -79,3 +79,7 @@ Fixtures are synthetic; no real transcripts are in the repo.
 
 Single-maintainer and young. The parsers were checked against real Claude Code, Codex and Kimi stores in September 2026;
 those formats can change under you. Issues and pull requests welcome.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

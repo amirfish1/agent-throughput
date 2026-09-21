@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "What your AI coding subscriptions really cost per token: a local usage database over Claude Code, Codex and Kimi session logs."
 readme = "README.md"
 requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Amir Fish" }]
 dependencies = []
 keywords = ["claude-code", "codex", "kimi", "token-usage", "cost", "sqlite"]
 
