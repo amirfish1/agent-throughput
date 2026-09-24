@@ -92,14 +92,14 @@ messages) and `duration_seconds`. Quality columns: `usage_complete`,
 `usage_events` — one row per billed model call (`engine + event_key` unique,
 tokens, model, timestamp, source file). Sessions are aggregates of it; per-model
 pricing, mid-session model changes and day/week/month buckets use it.
-Schema v2 adds `turn_index` (which incoming human message the call answers) and
-`action` (`wait` | `status` | `work` | NULL: what the call read — see
+Schema v2 added `turn_index` (which incoming human message the call answers) and
+`action` (`wait` | `status` | `dispatch` | `steer` | `work` | NULL: what the call read — see
 [Session analysis](#session-analysis)). Only the label is stored, never the
 command.
 
-Migrating a v1 database adds the columns and forgets `ingest_files`, so the next
-`ingest` re-reads every file once and fills the labels. Existing rows are
-updated in place.
+Migrating a v1 or v2 database adds any missing columns and forgets
+`ingest_files`, so the next `ingest` re-reads every file once and refreshes the
+labels (v3 added `dispatch`/`steer`). Existing rows are updated in place.
 
 `price_rates`, `subscription_plans`, `ingest_files`, `meta`, and the views
 `event_costs`, `session_costs`, `cost_by_day`, `cost_by_month`,
@@ -177,8 +177,12 @@ what each fix would have saved on those exact calls.
 read (the ones the previous call made, in the same turn):
 `wait` = only sleeps/waits; `status` = only waits and read-only status checks
 (process lists, log tails, `git status/log/fetch`, CI/PR/queue status, `curl`
-without a body, inline Python that only prints file tails); `work` = anything
-else. The first call of a turn reads a human message and has no label. The
+without a body, inline Python that only reads logs or transcripts or prints
+file tails); `dispatch` = handed work to another agent (`ccc send/spawn/ask`,
+`wt add`, Codex `spawn_agent`/`send_message`, Claude Code's Task tool);
+`steer` = a dispatch that interrupted a running agent (`ccc send --steer`);
+`work` = anything else. When a call read several kinds, steer > dispatch >
+work > status > wait. The first call of a turn reads a human message and has no label. The
 labels are heuristic; misses default to `work`.
 
 **Fixes simulated.**
@@ -188,6 +192,13 @@ labels are heuristic; misses default to `work`.
   first call of a turn pays its brief uncached. The evidence line says how much
   of the context was carried over from earlier turns; when under half, most of
   it built up within one turn and the fix suggests delegating to sub-agents.
+- *Delegate the checking, not just the building* — only for sessions that
+  handed work to other agents 5+ times (a supervisor). Every stretch of 3+
+  consecutive `work` calls becomes a sub-agent job that starts from the brief,
+  when that is cheaper than doing it in place. The supervisor's own calls are
+  priced as they happened, so the saving is conservative. Such sessions also get
+  a "Managing other agents" section: hand-offs, steers, peak hand-offs per hour,
+  and the cost shares of its own work and of waiting/checking.
 - *Stay under the long-context threshold* — waive the premium above.
 
 Fixes saving under 5% are listed on one line as minor.

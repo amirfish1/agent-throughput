@@ -30,6 +30,24 @@ class ActionLabelTests(unittest.TestCase):
         for cmd, want in cases.items():
             self.assertEqual(actions.tool_label("shell", cmd), want, cmd)
 
+    def test_handoffs(self):
+        cases = {
+            "CCC_SERVER=http://h:1 /r/ccc send --json --from abc worker-1 'go'": "dispatch",
+            "/r/ccc send --steer --json --from abc worker-1 'stop'": "steer",
+            "ccc --server http://h:1 ask s 'q?'": "dispatch",
+            "wt add QUEUE 'task'": "dispatch",
+            "ccc spawn --help": "work",
+            "cat SKILL.md && wt add --help": "work",
+            "ccc sessions": "status",
+            "python3 - <<'PY'\nfor l in open('/x/worker.jsonl'): print(l)\nPY": "status",
+        }
+        for cmd, want in cases.items():
+            self.assertEqual(actions.tool_label("shell", cmd), want, cmd)
+        self.assertEqual(actions.tool_label("Task"), "dispatch")
+        self.assertEqual(actions.tool_label("spawn_agent"), "dispatch")
+        self.assertEqual(actions.combine(["work", "dispatch"]), "dispatch")
+        self.assertEqual(actions.combine(["dispatch", "steer", "wait"]), "steer")
+
     def test_tools_and_combine(self):
         self.assertEqual(actions.tool_label("sleep"), "wait")
         self.assertEqual(actions.tool_label("TaskOutput"), "status")
@@ -149,7 +167,7 @@ class MigrationTests(unittest.TestCase):
         conn.execute("INSERT INTO ingest_files VALUES ('/x', 'codex', 1, 1, 1, 0, 'ok', NULL, 'now')")
         conn.execute("INSERT INTO price_rates (pricing_key, effective_from, input_rate) VALUES ('gpt-6-astra', '1970-01-01', 10)")
         conn.commit()
-        self.assertEqual(schema.migrate(conn), 1)
+        self.assertEqual(schema.migrate(conn), 1)  # (v2 -> v3 also forgets the files: labels changed)
         self.assertEqual(pricing.backfill_long_context(conn), 1)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(usage_events)")}
         self.assertTrue({"turn_index", "action"} <= cols)
@@ -193,6 +211,20 @@ class AnalyzeTests(UsageDbCase):
         gains = sum(f["score_gain"] for f in r["findings"])
         self.assertLessEqual(r["score"] + gains, 100)
         self.assertIn("push_not_pull", [f["key"] for f in r["findings"] + r["minor_findings"]])
+
+    def test_delegating_never_costs_more_and_needs_a_stretch(self):
+        ev = analyze._events(self.conn, self.one("SELECT id FROM sessions")["id"])
+        full = analyze.simulate(ev)
+        self.assertLessEqual(analyze.simulate(ev, delegate_work=True), full)
+        self.assertLessEqual(analyze.simulate(ev, fresh_per_turn=True, delegate_work=True),
+                             analyze.simulate(ev, fresh_per_turn=True))
+        # the fixture has one work call in a row: too short to brief an agent for
+        self.assertAlmostEqual(analyze.simulate(ev, delegate_work=True), full)
+
+    def test_no_supervision_section_without_handoffs(self):
+        r = analyze.analyze(self.conn, "cx", list_to_real=20)
+        self.assertIsNone(r["supervision"])
+        self.assertNotIn("delegate_checking", [f["key"] for f in r["findings"] + r["minor_findings"]])
 
     def test_cadence_spots_a_timer_not_a_person(self):
         hourly = [f"2026-09-01T{h:02d}:0{h % 3}:00Z" for h in range(8)]

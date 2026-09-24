@@ -402,6 +402,15 @@ def _print_analysis(r, st, W):
                   f"{st(f'{_money(t['list_usd']):>6}', 'bold')}  {st(render.bar(t['share_pct'] / 100, 24), 'blue')}"
                   f" {t['share_pct']:>3.0f}%")
 
+    sv = r.get("supervision")
+    if sv:
+        print("\n" + render.rule("Managing other agents", W, st))
+        print(f"  handed work to other agents {st(f'{sv['handoffs']:,}', 'bold')} times · "
+              f"{st(f'{sv['steers']:,}', 'bold')} interrupted an agent mid-task · peak "
+              f"{st(sv['peak_per_hour'], 'bold')} in one hour")
+        print(f"  its own work: {st(f'{sv['work_share_pct']:.0f}%', 'bold')} of cost · "
+              f"waiting and checking: {st(f'{sv['poll_share_pct']:.0f}%', 'bold')} of cost")
+
     print("\n" + render.rule("Fixes", W, st))
     if r["findings"]:
         print("  " + st("ranked by savings · each +X is what the fix adds on top of the ones above it", "grey"))

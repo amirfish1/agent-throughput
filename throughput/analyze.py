@@ -20,6 +20,8 @@ from . import actions, fees
 
 # Only findings at or above this share of list cost are reported.
 MIN_FINDING_SHARE = 5.0
+MIN_JOB_CALLS = 3  # shorter stretches of own work are not worth briefing an agent for
+MIN_HANDOFFS = 5  # a session that hands work to other agents this often is supervising
 
 
 class SessionNotFound(LookupError):
@@ -99,7 +101,8 @@ def real_ratio(conn, engine: str, started_at: str, last_at: str, as_of: Optional
 
 
 def simulate(events: list, drop_poll: bool = False, fresh_per_turn: bool = False,
-             waive_premium: bool = False, brief_tokens: int = 20_000) -> Optional[float]:
+             waive_premium: bool = False, delegate_work: bool = False,
+             brief_tokens: int = 20_000) -> Optional[float]:
     """List cost of the same calls with some fixes applied (``None`` if a fix needs labels the events lack).
 
     * ``drop_poll``: calls that only read a wait or a status check are not made (push: the
@@ -109,29 +112,59 @@ def simulate(events: list, drop_poll: bool = False, fresh_per_turn: bool = False
       from earlier turns is replaced by the brief, and the first call of each turn pays for
       its whole prompt uncached (a new session has no cache).
     * ``waive_premium``: no call pays the long-context premium.
+    * ``delegate_work``: each stretch of ``MIN_JOB_CALLS`` or more consecutive ``work`` calls in
+      a turn is a job a sub-agent does instead, starting from a brief the way a fresh turn
+      does, when that is cheaper than doing it in place. The supervisor's own calls are
+      priced as they happened (conservative: its context would also have grown less
+      without the job's tool output).
     """
-    if drop_poll and not any(e["action"] is not None for e in events):
+    labelled = any(e["action"] is not None for e in events)
+    if (drop_poll or delegate_work) and not labelled:
         return None
     if fresh_per_turn and (not events or any(e["turn_index"] is None for e in events)):
         return None
+
+    def cost(p):
+        return 0.0 if p is None else _cost(p) - (p["premium"] if waive_premium else 0.0)
+
     total, turn, base = 0.0, object(), 0
+    job = []  # (cost where it happened, cost as a sub-agent job) per call of the current work stretch
+
+    def close_job():
+        nonlocal total, job
+        here, delegated = sum(c for c, _ in job), sum(d for _, d in job)
+        total += min(here, delegated) if len(job) >= MIN_JOB_CALLS else here
+        job = []
+
     for e in events:
         inp, cr, cc = e["input_tokens"], e["cache_read_tokens"], e["cache_creation_tokens"]
         prompt = inp + cr + cc
         first = e["turn_index"] != turn
         if first:
             turn, base = e["turn_index"], prompt
+        if job and (first or e["action"] != actions.WORK):
+            close_job()
         if drop_poll and e["action"] in actions.POLL_ACTIONS:
             continue
-        if not fresh_per_turn:
-            p = _parts(e)
-        elif first:
+        if fresh_per_turn and first:
             p = _parts(e, inp=max(inp, min(prompt, brief_tokens) - cc), cr=0)
-        else:
+        elif fresh_per_turn:
             replay = min(prompt, brief_tokens + max(0, prompt - base))
             p = _parts(e, cr=max(0, cr - (prompt - replay)))
-        if p is not None:
-            total += _cost(p) - (p["premium"] if waive_premium else 0.0)
+        else:
+            p = _parts(e)
+        if delegate_work and e["action"] == actions.WORK:
+            if not job:
+                job_base = prompt
+                d = _parts(e, inp=max(inp, min(prompt, brief_tokens) - cc), cr=0)
+            else:
+                replay = min(prompt, brief_tokens + max(0, prompt - job_base))
+                d = _parts(e, cr=max(0, cr - (prompt - replay)))
+            job.append((cost(p), cost(d)))
+            continue
+        total += cost(p)
+    if job:
+        close_job()
     return total
 
 
@@ -203,6 +236,17 @@ def analyze(conn, ref: str, engine: Optional[str] = None, list_to_real: Optional
     for e, prompt in zip(ev, prompts):
         carried += min(prompt, turn_base.setdefault(e["turn_index"], prompt))
     carried_pct = 100.0 * carried / sum(prompts) if sum(prompts) else 0.0
+    handoffs = [e for e in ev if e["action"] in actions.DISPATCH_ACTIONS]
+    steers = sum(1 for e in handoffs if e["action"] == actions.STEER)
+    per_hour = {}
+    for e in handoffs:
+        per_hour[e["ts"][:13]] = per_hour.get(e["ts"][:13], 0) + 1
+    work_usd = sum(_cost(p) for e, p in priced if e["action"] == actions.WORK)
+    poll_usd = sum(_cost(p) for e, p in priced if e["action"] in actions.POLL_ACTIONS)
+    supervising = len(handoffs) >= MIN_HANDOFFS
+    supervision = None if not handoffs else {
+        "handoffs": len(handoffs), "steers": steers, "peak_per_hour": max(per_hour.values()),
+        "work_share_pct": round(share(work_usd), 1), "poll_share_pct": round(share(poll_usd), 1)}
     starts = {}
     for e in ev:
         starts.setdefault(e["turn_index"], e["ts"])
@@ -232,10 +276,19 @@ def analyze(conn, ref: str, engine: Optional[str] = None, list_to_real: Optional
           f"of context on average (peak {max(prompts, default=0) / 1000:,.0f}K); {carried_pct:.0f}% of it was "
           f"carried over from earlier turns. Simulated: every turn starts from a {brief_tokens // 1000}K-token brief."),
          fresh_fix),
+        ("delegate_checking", {"delegate_work": True}, "Delegate the checking, not just the building",
+         (f"This session handed work to other agents {len(handoffs):,} times ({steers:,} of them interrupted "
+          f"an agent mid-task; up to {supervision['peak_per_hour'] if supervision else 0} in one hour), yet "
+          f"{share(work_usd):.0f}% of its cost went to work it did itself in its own context: reading code, "
+          f"running tests and scripts. Simulated: every stretch of {MIN_JOB_CALLS}+ calls of that work goes to a sub-agent "
+          f"starting from a {brief_tokens // 1000}K-token brief, when that is cheaper."),
+         ("Send investigation and verification to an agent too: brief it, end the turn, and act on its short "
+          "report. Batch corrections into one message per agent instead of steering it mid-task.")),
         ("long_context", {"waive_premium": True}, "Stay under the long-context price step",
          f"{premium_calls:,} calls crossed the model's long-context threshold and paid a higher input rate.",
          "Start a new session (or compact) before the context reaches the threshold."),
     ]
+    candidates = [c for c in candidates if c[0] != "delegate_checking" or supervising]
     applicable = [c for c in candidates if sim(**c[1]) is not None]
     alone = {c[0]: sim(**c[1]) for c in applicable}
     applicable.sort(key=lambda c: alone[c[0]])
@@ -267,6 +320,7 @@ def analyze(conn, ref: str, engine: Optional[str] = None, list_to_real: Optional
         "optimized": money(optimized),
         "breakdown": breakdown,
         "heaviest_turns": heaviest,
+        "supervision": supervision,
         "findings": findings,
         "minor_findings": minor,
     }
