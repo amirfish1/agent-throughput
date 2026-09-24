@@ -134,13 +134,13 @@ def _claim_events(conn, session_id: int, ps: ParsedSession, report: Report, dirt
         cur = conn.execute(
             "INSERT OR IGNORE INTO usage_events (session_id, engine, event_key, ts, model_id, "
             "pricing_key, input_tokens, cache_read_tokens, cache_creation_tokens, "
-            "cache_creation_1h_tokens, output_tokens, reasoning_tokens, scope, source_path) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "cache_creation_1h_tokens, output_tokens, reasoning_tokens, scope, source_path, "
+            "turn_index, action) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 session_id, ps.engine, e.event_key, e.ts, e.model_id, pricing_key(e.model_id),
                 e.input_tokens, e.cache_read_tokens, e.cache_creation_tokens,
                 e.cache_creation_1h_tokens, e.output_tokens, e.reasoning_tokens, e.scope,
-                ps.source_path,
+                ps.source_path, e.turn_index, e.action,
             ),
         )
         if cur.rowcount:

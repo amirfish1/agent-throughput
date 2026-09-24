@@ -16,6 +16,13 @@ class UsageEvent:
     ``cache_creation_1h_tokens`` is the subset of ``cache_creation_tokens`` written
     with the 1-hour TTL (Claude only; other engines leave it 0).
     ``reasoning_tokens`` is informational: it is already inside ``output_tokens``.
+
+    ``turn_index`` numbers the incoming messages (a person's or an automation's)
+    within the session; every call until the next one belongs to that turn.
+    ``action`` labels what the call was spent reading: the results of the
+    previous call's tool calls. ``wait`` = only a sleep/wait, ``status`` = only
+    status checks, ``work`` = anything else, ``None`` = nothing to read (first
+    call of a turn) or unknown. Labels, never conversation text.
     """
 
     event_key: str
@@ -28,6 +35,8 @@ class UsageEvent:
     output_tokens: int = 0
     reasoning_tokens: int = 0
     scope: str = "call"  # 'call' | 'compaction' (Kimi session-scope summary calls)
+    turn_index: Optional[int] = None
+    action: Optional[str] = None
 
 
 @dataclass

@@ -143,7 +143,8 @@
    "cache_write_5m": null,
    "cache_write_1h": null,
    "output": 50.0,
-   "source_note": "seeded from published list prices (checked 2026-07..09); effective date unknown so applied to all time",
+   "long_context": {"above": 272000, "multiplier": 2.0},
+   "source_note": "seeded from published list prices (checked 2026-07..09); effective date unknown so applied to all time; long_context: prompts over 272K input tokens pay 2x input and cached-input rates, output unchanged (published pricing as reported 2026-09-24, not yet verified here)",
    "verified_at": null
   },
   {

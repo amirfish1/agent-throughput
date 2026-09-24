@@ -23,20 +23,46 @@ def load_rates(conn, path: Optional[str] = None) -> int:
         conn.execute(
             "INSERT INTO price_rates (provider, pricing_key, effective_from, effective_to, currency, "
             "unit, input_rate, cache_read_rate, cache_write_5m_rate, cache_write_1h_rate, output_rate, "
-            "source_note, verified_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "source_note, verified_at, long_context_threshold, long_context_multiplier) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(pricing_key, effective_from) DO UPDATE SET "
             "provider=excluded.provider, effective_to=excluded.effective_to, currency=excluded.currency, "
             "unit=excluded.unit, input_rate=excluded.input_rate, cache_read_rate=excluded.cache_read_rate, "
             "cache_write_5m_rate=excluded.cache_write_5m_rate, cache_write_1h_rate=excluded.cache_write_1h_rate, "
-            "output_rate=excluded.output_rate, source_note=excluded.source_note, verified_at=excluded.verified_at",
+            "output_rate=excluded.output_rate, source_note=excluded.source_note, verified_at=excluded.verified_at, "
+            "long_context_threshold=excluded.long_context_threshold, "
+            "long_context_multiplier=excluded.long_context_multiplier",
             (
                 r.get("provider"), r["pricing_key"], r.get("effective_from", "1970-01-01"),
                 r.get("effective_to"), r.get("currency", "USD"), r.get("unit", "per_1m_tokens"),
                 r.get("input"), r.get("cache_read"), r.get("cache_write_5m"),
                 r.get("cache_write_1h"), r.get("output"), r.get("source_note"), r.get("verified_at"),
+                (r.get("long_context") or {}).get("above"), (r.get("long_context") or {}).get("multiplier"),
             ),
         )
         n += 1
+    conn.commit()
+    return n
+
+
+def backfill_long_context(conn, path: Optional[str] = None) -> int:
+    """Copy the packaged long-context premiums onto existing rate rows (v1 -> v2 upgrade).
+
+    Only fills rows that have no premium yet, matched by ``(pricing_key, effective_from)``,
+    so a rate the user loaded or edited keeps everything else it has.
+    """
+    with open(path or PACKAGED_RATES, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    n = 0
+    for r in doc.get("rates", []):
+        lc = r.get("long_context") or {}
+        if lc.get("above") is None:
+            continue
+        n += conn.execute(
+            "UPDATE price_rates SET long_context_threshold=?, long_context_multiplier=? "
+            "WHERE pricing_key=? AND effective_from=? AND long_context_threshold IS NULL",
+            (lc["above"], lc.get("multiplier"), r["pricing_key"], r.get("effective_from", "1970-01-01")),
+        ).rowcount
     conn.commit()
     return n
 

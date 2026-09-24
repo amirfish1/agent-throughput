@@ -39,7 +39,24 @@ throughput runrate                                  # trailing-30-day and month-
 throughput breakeven --fee 200                      # would a second $200 plan pay for itself?
 throughput sessions --order "cost_usd DESC" --limit 10
 throughput sql "SELECT * FROM cost_by_month"        # read-only SQL over the views
+throughput analyze 01a0c969                         # where one session's money went, and what would have saved it
 ```
+
+### Why was that session so expensive?
+
+`throughput analyze <session-id-prefix>` breaks one session's cost into fresh input, cache reads, cache writes and
+output, lists its heaviest turns, and ranks fixes by the money each would have saved:
+
+```
+Score: 43/100
+1. Start a new session per task   +36 points — alone saves 46% · $118 list · ≈ $5.88 real
+2. Switch from pull to push        +21 points — alone saves 24% · $61 list · ≈ $3.05 real
+```
+
+The score is 100 × (cost with every fix applied) ÷ (actual cost). Each `+X` is what that fix adds on top of the fixes
+ranked above it, so the gains sum to 100 − score. Fixes are simulated on the session's own calls, not estimated from
+averages. Real dollars use your plan's list:real ratio for the months the session ran; pass `--list-to-real 20` if your
+subscription is shared with another machine whose usage this database does not see.
 
 It reads `~/.claude/projects` (Claude Code), `~/.codex/sessions` and `~/.codex/archived_sessions` (Codex) and
 `~/.kimi-code` (Kimi; override with `KIMI_CODE_HOME`). The database is `~/.local/share/throughput/throughput.sqlite3`
@@ -55,6 +72,9 @@ It reads `~/.claude/projects` (Claude Code), `~/.codex/sessions` and `~/.codex/a
   is applied to every period shown, including months before you subscribed.
 - **Per-model real cost is an estimate.** The fee is per engine, so model rows show `est.` columns: the fee split in
   proportion to list cost. That assumes quota is consumed in proportion to list price, which no provider guarantees.
+- **`analyze` labels are heuristics.** A call counts as polling when every tool call it read was a sleep or a read-only
+  status check (`git status`, `tail`, `gh run view`, ...). Unusual status commands count as work, so the push/pull saving
+  is a lower bound.
 - **Cache reads dominate token counts** (about 97% for heavy Claude Code use), which is why REAL /MTok is small. Compare
   LIST:REAL across engines instead.
 

@@ -12,6 +12,9 @@ Verified facts this parser depends on:
 * ``usage.input_tokens`` excludes cache buckets; cache creation is
   ``cache_creation_input_tokens`` with a 5m/1h split under ``usage.cache_creation``.
 * ``model == "<synthetic>"`` marks client-generated messages with no billed usage.
+* A response's ``tool_use`` blocks can sit on any of its lines; their results are
+  read by the next response. So a call's ``action`` is the label of the previous
+  call's tool uses, and a person's message starts a new turn with no action.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import glob
 import os
 from typing import Iterator
 
+from .. import actions
 from ..types import ParsedSession, SourceFile, UsageEvent
 from .common import as_int, iter_json_lines, norm_ts, ts_min_max
 
@@ -58,6 +62,18 @@ def _is_user_message(rec: dict) -> bool:
     return False
 
 
+def _tool_use_labels(content) -> list:
+    if not isinstance(content, list):
+        return []
+    out = []
+    for b in content:
+        if isinstance(b, dict) and b.get("type") == "tool_use":
+            inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+            cmd = inp.get("command") if (b.get("name") or "").lower() == "bash" else None
+            out.append(actions.tool_label(b.get("name"), cmd if isinstance(cmd, str) else None))
+    return out
+
+
 def parse(sf: SourceFile) -> list:
     path = sf.path
     stem = os.path.basename(path)[: -len(".jsonl")]
@@ -86,6 +102,10 @@ def parse(sf: SourceFile) -> list:
     cwds = set()
     cost_state = None
     synthetic_with_tokens = 0
+    turn = 0
+    made = {}  # event index -> labels of the tool uses that response made
+    made_lines = {}  # event index -> line uuids already counted into ``made``
+    by_mid = {}  # message id -> event index
     for lineno, rec in iter_json_lines(path, on_error):
         ts = norm_ts(rec.get("timestamp"))
         span = ts_min_max(span, ts)
@@ -110,6 +130,10 @@ def parse(sf: SourceFile) -> list:
             model = msg.get("model")
             usage = msg.get("usage")
             mid = msg.get("id")
+            labels = _tool_use_labels(content)
+            if mid in by_mid and labels and uuid not in made_lines[by_mid[mid]]:
+                made[by_mid[mid]].extend(labels)
+                made_lines[by_mid[mid]].add(uuid)
             if model == "<synthetic>":
                 if usage and any(as_int(usage.get(k)) for k in ("input_tokens", "output_tokens")):
                     synthetic_with_tokens += 1
@@ -137,15 +161,25 @@ def parse(sf: SourceFile) -> list:
                     cache_creation_1h_tokens=one_h,
                     output_tokens=as_int(usage.get("output_tokens")),
                     reasoning_tokens=as_int(details.get("thinking_tokens")),
+                    turn_index=turn,
                 )
             )
+            idx = len(ps.events) - 1
+            made[idx] = list(labels)
+            made_lines[idx] = {uuid}
+            if mid:
+                by_mid[mid] = idx
         elif rtype == "user":
             if _is_user_message(rec):
                 ps.user_message_count += 1
+                turn += 1
         elif rtype == "system" and rec.get("subtype") == "compact_boundary":
             ps.compaction_count += 1
         elif rtype == "cost-state":
             cost_state = rec
+    for i in range(1, len(ps.events)):
+        if ps.events[i].turn_index == ps.events[i - 1].turn_index:
+            ps.events[i].action = actions.combine(made.get(i - 1, []))
     ps.started_at, ps.last_activity_at = span
     if cost_state:
         ps.metadata["cost_state"] = {

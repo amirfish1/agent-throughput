@@ -12,6 +12,7 @@ import tempfile
 from datetime import datetime, timedelta
 
 from . import ingest as ingest_mod
+from . import analyze as analyze_mod
 from . import fees, pricing, queries, schema
 from .adapters import ADAPTERS
 
@@ -42,7 +43,8 @@ def _open(args, must_exist=False):
         sys.exit(f"no usage DB at {path}; run 'throughput ingest' first")
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     conn = schema.connect(path)
-    schema.migrate(conn)
+    if schema.migrate(conn) == 1:
+        pricing.backfill_long_context(conn)
     return conn
 
 
@@ -326,6 +328,73 @@ def cmd_rates(args):
     return 0
 
 
+def _dur(seconds):
+    if not seconds:
+        return "-"
+    h, m = divmod(int(seconds) // 60, 60)
+    return f"{h}h{m:02d}m" if h else f"{m}m"
+
+
+def _usd_pair(d):
+    real = f" · ≈ {_money(d['real_usd'])} real" if d.get("real_usd") is not None else ""
+    return f"{_money(d['list_usd'])} list{real}"
+
+
+def cmd_analyze(args):
+    conn = _open(args, True)
+    try:
+        r = analyze_mod.analyze(conn, args.session, args.engine, args.list_to_real, args.brief,
+                                as_of=fees.parse_day(args.as_of) if args.as_of else None)
+    except analyze_mod.SessionNotFound as exc:
+        sys.exit(str(exc))
+    if args.json:
+        print(json.dumps(r, indent=2, default=str))
+        return 0
+    s = r["session"]
+    print(f"{s['source_session_id']}  {s['engine']} · {s['model_label'] or s['model_id'] or '?'}"
+          f" · {s['project_name'] or '-'}")
+    print(f"{(s['started_at'] or '')[:16].replace('T', ' ')} -> {(s['last_activity_at'] or '')[:16].replace('T', ' ')}"
+          f" ({_dur(s['duration_seconds'])}) · {r['turns']:,} turns · {r['calls']:,} model calls"
+          f" · {s['compaction_count']} compactions")
+    cost = f"\nCost: {_money(r['list_usd'])} list"
+    if r["real_usd"] is not None:
+        cost += f" · ≈ {_money(r['real_usd'])} real  ({r['list_to_real']:.1f}:1, {r['ratio_source']})"
+    else:
+        cost += f"  (real $ unknown: {r['ratio_source']}; add a plan or pass --list-to-real)"
+    print(cost)
+    opt = r["optimized"]
+    print(f"Score: {r['score']}/100  (the same work with every fix below would cost {_usd_pair(opt)};"
+          " 100 = no avoidable spend these checks can find)")
+    if r["unpriced_calls"]:
+        print(f"note: {r['unpriced_calls']:,} calls have no price on file and are left out, so dollars are lower bounds")
+
+    print("\nWhere the money went")
+    print_table([{"bucket": b["bucket"], "total_tokens": b["tokens"], "cost_usd": b["list_usd"],
+                  "share": f"{b['share_pct']:.0f}%"} for b in r["breakdown"]], ["bucket", "total_tokens", "cost_usd", "share"])
+
+    if r["heaviest_turns"]:
+        print("\nHeaviest turns")
+        print_table([{"turn": t["turn"], "started": (t["started"] or "")[:16].replace("T", " "), "calls": t["calls"],
+                      "cost_usd": t["list_usd"], "share": f"{t['share_pct']:.0f}%"} for t in r["heaviest_turns"]])
+
+    if r["findings"]:
+        print("\nFixes (ranked by savings; each +X is what the fix adds on top of the ones above it)")
+        for i, f in enumerate(r["findings"], 1):
+            print(f"{i}. {f['title']}  +{f['score_gain']} points  —  alone saves {f['share_pct']:.0f}%"
+                  f" · {_usd_pair(f)}")
+            print(f"   {f['evidence']}")
+            print(f"   Fix: {f['fix']}")
+    else:
+        print(f"\nNo fix would save {analyze_mod.MIN_FINDING_SHARE:.0f}% or more of this session's cost.")
+    if r["minor_findings"]:
+        print(f"also checked, each under {analyze_mod.MIN_FINDING_SHARE:.0f}%: " + "; ".join(
+            f"{f['title']} ({f['share_pct']:.1f}%)" for f in r["minor_findings"]))
+    if not r["labelled"]:
+        print("\nnote: no per-call labels for this session (engine without tool detail, or ingested before "
+              "schema v2); pull/push findings are unavailable")
+    return 0
+
+
 def cmd_sql(args):
     conn = _open(args, True)
     conn.execute("PRAGMA query_only = ON")
@@ -390,6 +459,16 @@ def build_parser():
     s = sub.add_parser("rates", help="list rates or load a rates JSON file")
     s.add_argument("action", choices=["list", "load"], nargs="?", default="list")
     s.add_argument("--file"); s.set_defaults(fn=cmd_rates)
+
+    s = sub.add_parser("analyze", help="why one session cost what it did, and what would have been cheaper")
+    s.add_argument("session", help="session id or a unique prefix of it")
+    s.add_argument("--engine", type=_engine)
+    s.add_argument("--list-to-real", type=float, metavar="X",
+                   help="LIST:REAL ratio to convert list $ to real $ (default: from your plans and this DB)")
+    s.add_argument("--brief", type=int, default=20_000, metavar="TOKENS",
+                   help="summary size a fresh session would start from in the what-if (default 20000)")
+    s.add_argument("--as-of", help="end of the fee period for the real ratio (YYYY-MM-DD, default today)")
+    s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_analyze)
 
     s = sub.add_parser("sql", help="run a read-only SQL query")
     s.add_argument("query"); s.set_defaults(fn=cmd_sql)

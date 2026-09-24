@@ -33,6 +33,7 @@ stores: `ingest --full-rebuild` recreates every row.
 | `breakeven --fee N` | Second-subscription comparison; the candidate fee is an input, never assumed. Also reports your current real $/MTok and list:real. |
 | `plans add --name --engine --fee [--since D] [--until D]` / `plans` | Record subscription fees you actually pay. Same `--name` updates the plan in place (how you set its dates). `--since` inclusive, `--until` exclusive, `YYYY-MM-DD`; USD only. |
 | `rates [load --file F]` | Show or load the price table. |
+| `analyze SESSION [--engine E] [--list-to-real X] [--brief TOKENS] [--as-of T] [--json]` | One session: cost breakdown, heaviest turns, a 0–100 score and ranked fixes with their saving in % of cost, list $ and real $. `SESSION` is an id or unique prefix. See [Session analysis](#session-analysis). |
 | `sql "SELECT ..."` | Read-only SQL. |
 
 ## Verified store formats
@@ -91,6 +92,14 @@ messages) and `duration_seconds`. Quality columns: `usage_complete`,
 `usage_events` — one row per billed model call (`engine + event_key` unique,
 tokens, model, timestamp, source file). Sessions are aggregates of it; per-model
 pricing, mid-session model changes and day/week/month buckets use it.
+Schema v2 adds `turn_index` (which incoming human message the call answers) and
+`action` (`wait` | `status` | `work` | NULL: what the call read — see
+[Session analysis](#session-analysis)). Only the label is stored, never the
+command.
+
+Migrating a v1 database adds the columns and forgets `ingest_files`, so the next
+`ingest` re-reads every file once and fills the labels. Existing rows are
+updated in place.
 
 `price_rates`, `subscription_plans`, `ingest_files`, `meta`, and the views
 `event_costs`, `session_costs`, `cost_by_day`, `cost_by_month`,
@@ -114,6 +123,13 @@ inline in queries. `event_costs` joins the rate in force on each call's date.
   per-token price. `breakeven` reports the API-equivalent run rate next to the
   fees and the share of that run rate an extra subscription would need to absorb.
 - Cache savings = cache-read tokens × (input rate − cache-read rate).
+- **Long-context premium.** A rate can carry
+  `"long_context": {"above": 272000, "multiplier": 2.0}` in `rates.json`
+  (`long_context_threshold` / `long_context_multiplier` in `price_rates`). A call
+  whose prompt (fresh + cache read + cache write) exceeds the threshold pays the
+  multiplier on its input, cache-read and cache-write parts; output is unchanged.
+  `event_costs.input_multiplier` shows which calls paid it. The shipped
+  `gpt-6-astra` rule is unverified.
 
 ### Real cost (what you actually pay)
 Your plan fee is a flat monthly charge, so it is reported only where it means
@@ -151,6 +167,40 @@ The shipped rates are published list prices, with the Anthropic 1-hour cache-wri
 rate added (2× input). The Claude rates for Haiku 4.5, Sonnet 5 and Opus 5 were checked by
 fitting them to Claude Code's own `cost-state` totals (session cost within 1%
 in aggregate). That is Claude Code's client-side estimate, not an invoice.
+
+## Session analysis
+
+`analyze` replays one session's calls through a small cost simulator and asks
+what each fix would have saved on those exact calls.
+
+**Action labels.** Each call is labelled by the tool calls whose results it
+read (the ones the previous call made, in the same turn):
+`wait` = only sleeps/waits; `status` = only waits and read-only status checks
+(process lists, log tails, `git status/log/fetch`, CI/PR/queue status, `curl`
+without a body, inline Python that only prints file tails); `work` = anything
+else. The first call of a turn reads a human message and has no label. The
+labels are heuristic; misses default to `work`.
+
+**Fixes simulated.**
+- *Switch from pull to push* — drop every `wait`/`status` call.
+- *Start a new session per task* — each turn after the first starts from a
+  brief (`--brief`, default 20,000 tokens) instead of the carried context; the
+  first call of a turn pays its brief uncached. The evidence line says how much
+  of the context was carried over from earlier turns; when under half, most of
+  it built up within one turn and the fix suggests delegating to sub-agents.
+- *Stay under the long-context threshold* — waive the premium above.
+
+Fixes saving under 5% are listed on one line as minor.
+
+**Score.** 100 × (cost with every fix applied) ÷ (actual cost). Fixes are
+ranked by what each saves alone, then applied cumulatively in that order; a
+fix's `+X` is the score after it minus the score before it, so the gains sum to
+100 − score.
+
+**Real dollars.** list $ ÷ list:real, where list:real is the engine's list cost
+÷ plan fee over the calendar months the session ran (through `--as-of`).
+`--list-to-real` overrides it — use it when one subscription is shared with
+machines this database does not see.
 
 ## Known gaps
 - **Codex running totals.** `total_token_usage` drops mid-file in about 18% of

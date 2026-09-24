@@ -15,6 +15,11 @@ Verified facts this parser depends on:
   fresh input is therefore ``input - cached - cache_write``.
 * The model is per turn (``turn_context.model``) and can change mid-session, so
   each event takes the model of the most recent turn.
+* A call's tool calls (``response_item``) are written *before* its ``token_count``,
+  and their outputs are read by the *next* call. So a call's ``action`` is the
+  label of the tool calls logged before the previous ``token_count``.
+* Code-mode ``exec`` input is JavaScript that calls ``tools.<name>({...})``; shell
+  commands are the ``cmd`` string of ``tools.exec_command``.
 """
 
 from __future__ import annotations
@@ -22,8 +27,10 @@ from __future__ import annotations
 import glob
 import json
 import os
-from typing import Iterator
+import re
+from typing import Iterator, Optional
 
+from .. import actions
 from ..types import ParsedSession, SourceFile, UsageEvent
 from .common import as_int, iter_json_lines, norm_ts, ts_min_max
 
@@ -36,6 +43,42 @@ _TOOL_ITEMS = {
     "tool_search_call",
     "web_search_call",
 }
+
+
+_JS_TOOL = re.compile(r"tools\.(\w+)\s*\(")
+_JS_CMD = re.compile(r"""\bcmd\s*:\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|`((?:[^`\\]|\\.)*)`)""")
+
+
+def _shell_from_args(raw) -> Optional[str]:
+    """The shell command of a function-call tool (``{"cmd": ...}`` or ``{"command": [...]}``)."""
+    try:
+        args = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return None
+    if not isinstance(args, dict):
+        return None
+    cmd = args.get("cmd", args.get("command"))
+    if isinstance(cmd, list):
+        cmd = cmd[-1] if len(cmd) >= 3 and cmd[1] in ("-c", "-lc") else " ".join(map(str, cmd))
+    return cmd if isinstance(cmd, str) else None
+
+
+def _tool_labels(p: dict) -> list:
+    """Labels of one tool-call item; a code-mode ``exec`` can hold several tool calls."""
+    it, name = p.get("type"), p.get("name")
+    if it == "local_shell_call":
+        action = p.get("action") if isinstance(p.get("action"), dict) else {}
+        return [actions.tool_label("shell", _shell_from_args({"command": action.get("command")}) or "")]
+    if it == "custom_tool_call" and name == "exec":
+        src = p.get("input") if isinstance(p.get("input"), str) else ""
+        inner = _JS_TOOL.findall(src)
+        if not inner:
+            return [actions.WORK]
+        cmds = iter(next(g for g in m if g) if any(m) else "" for m in _JS_CMD.findall(src))
+        return [actions.tool_label(t, next(cmds, "") if t == "exec_command" else None) for t in inner]
+    if name in ("shell", "exec_command", "container.exec"):
+        return [actions.tool_label("shell", _shell_from_args(p.get("arguments")) or "")]
+    return [actions.tool_label(name)]
 
 
 def default_root() -> str:
@@ -68,6 +111,9 @@ def parse(sf: SourceFile) -> list:
     monotonic = True
     final_total = 0
     clamped = False
+    turn = -1
+    pending = []  # labels of tool calls made by the call whose token_count comes next
+    prev_made = None  # combined label of the tool calls made by the previous call
     for lineno, rec in iter_json_lines(sf.path, on_error):
         ts = norm_ts(rec.get("timestamp"))
         span = ts_min_max(span, ts)
@@ -117,9 +163,13 @@ def parse(sf: SourceFile) -> list:
                 ps.assistant_message_count += 1
             elif it in _TOOL_ITEMS:
                 ps.tool_call_count += 1
+                pending.extend(_tool_labels(p))
         elif rtype == "event_msg":
             et = p.get("type")
-            if et == "user_message":
+            if et == "task_started":
+                turn += 1
+                prev_made = None  # a new turn starts from an incoming message, not a tool result
+            elif et == "user_message":
                 ps.user_message_count += 1
             elif et == "token_count" and isinstance(p.get("info"), dict):
                 info = p["info"]
@@ -134,6 +184,7 @@ def parse(sf: SourceFile) -> list:
                 if sig in seen:
                     continue  # the same event re-emitted
                 seen.add(sig)
+                action, prev_made, pending = prev_made, actions.combine(pending), []
                 cached = as_int(last.get("cached_input_tokens"))
                 write = as_int(last.get("cache_write_input_tokens"))
                 fresh = as_int(last.get("input_tokens")) - cached - write
@@ -150,6 +201,8 @@ def parse(sf: SourceFile) -> list:
                         cache_creation_tokens=write,
                         output_tokens=as_int(last.get("output_tokens")),
                         reasoning_tokens=as_int(last.get("reasoning_output_tokens")),
+                        turn_index=max(turn, 0),
+                        action=action,
                     )
                 )
     if ps is None:

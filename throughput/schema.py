@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _TABLES = """
 CREATE TABLE IF NOT EXISTS ingest_files (
@@ -90,6 +90,8 @@ CREATE TABLE IF NOT EXISTS usage_events (
     reasoning_tokens         INTEGER NOT NULL DEFAULT 0,
     scope                    TEXT NOT NULL DEFAULT 'call',
     source_path              TEXT,             -- file the event was read from (a session id can span files)
+    turn_index               INTEGER,          -- which incoming message this call answers (NULL = unknown)
+    action                   TEXT,             -- wait | status | work | NULL: what the call read (see actions.py)
     UNIQUE (engine, event_key)
 );
 CREATE INDEX IF NOT EXISTS idx_events_session ON usage_events(session_id);
@@ -113,6 +115,10 @@ CREATE TABLE IF NOT EXISTS price_rates (
     output_rate         REAL,
     source_note         TEXT,
     verified_at         TEXT,              -- NULL = carried over, not independently verified
+    -- Long-context premium: a call whose prompt (fresh + cache read + cache write)
+    -- exceeds the threshold pays multiplier x on its input-side rates; output is unaffected.
+    long_context_threshold  INTEGER,
+    long_context_multiplier REAL,
     UNIQUE (pricing_key, effective_from)
 );
 
@@ -135,38 +141,49 @@ _VIEWS = """
 DROP VIEW IF EXISTS event_costs;
 CREATE VIEW event_costs AS
 SELECT
-    e.id AS event_id, e.session_id, e.engine, e.ts, e.model_id, e.pricing_key,
-    e.input_tokens, e.cache_read_tokens, e.cache_creation_tokens,
-    e.cache_creation_1h_tokens, e.output_tokens,
-    r.id AS rate_id,
+    event_id, session_id, engine, ts, model_id, pricing_key,
+    input_tokens, cache_read_tokens, cache_creation_tokens,
+    cache_creation_1h_tokens, output_tokens, turn_index, action, rate_id, input_multiplier,
     -- NULL (unknown) unless the rate row has every rate this event actually uses.
-    CASE WHEN r.id IS NULL THEN NULL
-         WHEN (e.input_tokens > 0 AND r.input_rate IS NULL)
-           OR (e.cache_read_tokens > 0 AND r.cache_read_rate IS NULL)
-           OR ((e.cache_creation_tokens - e.cache_creation_1h_tokens) > 0 AND r.cache_write_5m_rate IS NULL)
-           OR (e.cache_creation_1h_tokens > 0 AND COALESCE(r.cache_write_1h_rate, r.cache_write_5m_rate) IS NULL)
-           OR (e.output_tokens > 0 AND r.output_rate IS NULL) THEN NULL
+    CASE WHEN rate_id IS NULL THEN NULL
+         WHEN (input_tokens > 0 AND input_rate IS NULL)
+           OR (cache_read_tokens > 0 AND cache_read_rate IS NULL)
+           OR ((cache_creation_tokens - cache_creation_1h_tokens) > 0 AND cache_write_5m_rate IS NULL)
+           OR (cache_creation_1h_tokens > 0 AND COALESCE(cache_write_1h_rate, cache_write_5m_rate) IS NULL)
+           OR (output_tokens > 0 AND output_rate IS NULL) THEN NULL
          ELSE (
-            e.input_tokens * COALESCE(r.input_rate, 0)
-          + e.cache_read_tokens * COALESCE(r.cache_read_rate, 0)
-          + (e.cache_creation_tokens - e.cache_creation_1h_tokens) * COALESCE(r.cache_write_5m_rate, 0)
-          + e.cache_creation_1h_tokens * COALESCE(r.cache_write_1h_rate, r.cache_write_5m_rate, 0)
-          + e.output_tokens * COALESCE(r.output_rate, 0)
+            input_multiplier * (
+              input_tokens * COALESCE(input_rate, 0)
+            + cache_read_tokens * COALESCE(cache_read_rate, 0)
+            + (cache_creation_tokens - cache_creation_1h_tokens) * COALESCE(cache_write_5m_rate, 0)
+            + cache_creation_1h_tokens * COALESCE(cache_write_1h_rate, cache_write_5m_rate, 0))
+          + output_tokens * COALESCE(output_rate, 0)
          ) / 1000000.0
     END AS cost_usd,
     -- What the cache reads would have cost at the full input rate, minus what
     -- they did cost. NULL when the input or cache-read rate is unknown.
-    CASE WHEN r.input_rate IS NULL OR r.cache_read_rate IS NULL THEN NULL
-         ELSE e.cache_read_tokens * (r.input_rate - r.cache_read_rate) / 1000000.0
+    CASE WHEN input_rate IS NULL OR cache_read_rate IS NULL THEN NULL
+         ELSE input_multiplier * cache_read_tokens * (input_rate - cache_read_rate) / 1000000.0
     END AS cache_read_savings_usd
-FROM usage_events e
-LEFT JOIN price_rates r ON r.id = (
-    SELECT p.id FROM price_rates p
-    WHERE p.pricing_key = e.pricing_key
-      AND p.currency = 'USD'
-      AND substr(COALESCE(e.ts, '9999'), 1, 10) >= p.effective_from
-      AND (p.effective_to IS NULL OR substr(COALESCE(e.ts, '9999'), 1, 10) < p.effective_to)
-    ORDER BY p.effective_from DESC LIMIT 1
+FROM (
+    SELECT
+        e.id AS event_id, e.session_id, e.engine, e.ts, e.model_id, e.pricing_key,
+        e.input_tokens, e.cache_read_tokens, e.cache_creation_tokens,
+        e.cache_creation_1h_tokens, e.output_tokens, e.turn_index, e.action,
+        r.id AS rate_id, r.input_rate, r.cache_read_rate, r.cache_write_5m_rate,
+        r.cache_write_1h_rate, r.output_rate,
+        CASE WHEN r.long_context_threshold IS NOT NULL
+              AND e.input_tokens + e.cache_read_tokens + e.cache_creation_tokens > r.long_context_threshold
+             THEN COALESCE(r.long_context_multiplier, 1.0) ELSE 1.0 END AS input_multiplier
+    FROM usage_events e
+    LEFT JOIN price_rates r ON r.id = (
+        SELECT p.id FROM price_rates p
+        WHERE p.pricing_key = e.pricing_key
+          AND p.currency = 'USD'
+          AND substr(COALESCE(e.ts, '9999'), 1, 10) >= p.effective_from
+          AND (p.effective_to IS NULL OR substr(COALESCE(e.ts, '9999'), 1, 10) < p.effective_to)
+        ORDER BY p.effective_from DESC LIMIT 1
+    )
 );
 
 DROP VIEW IF EXISTS session_costs;
@@ -243,14 +260,35 @@ def connect(path: str) -> sqlite3.Connection:
     return conn
 
 
-def migrate(conn: sqlite3.Connection) -> None:
-    """Create/upgrade the schema. Views are always recreated (they hold no data)."""
+# Columns added after v1: (table, column, declaration).
+_ADDED_COLUMNS = (
+    ("usage_events", "turn_index", "INTEGER"),
+    ("usage_events", "action", "TEXT"),
+    ("price_rates", "long_context_threshold", "INTEGER"),
+    ("price_rates", "long_context_multiplier", "REAL"),
+)
+
+
+def migrate(conn: sqlite3.Connection) -> int:
+    """Create/upgrade the schema; returns the version the DB had before (0 = new).
+
+    Views are always recreated (they hold no data). Upgrading from v1 forgets
+    which files were ingested, so the next ingest re-reads them all and fills the
+    per-call ``turn_index``/``action`` labels that v1 did not record.
+    """
     have = conn.execute("PRAGMA user_version").fetchone()[0]
     if have > SCHEMA_VERSION:
         raise RuntimeError(
             f"usage DB schema v{have} is newer than this code (v{SCHEMA_VERSION})"
         )
     conn.executescript(_TABLES)
+    for table, col, decl in _ADDED_COLUMNS:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    if have == 1:
+        conn.execute("DELETE FROM ingest_files")
     conn.executescript(_VIEWS)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
+    return have
