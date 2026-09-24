@@ -14,7 +14,7 @@ their shares are not additive.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from typing import List, Optional
 
 from . import actions, fees
 
@@ -135,6 +135,23 @@ def simulate(events: list, drop_poll: bool = False, fresh_per_turn: bool = False
     return total
 
 
+def cadence(starts: List[str]) -> Optional[float]:
+    """Median seconds between turn starts when the turns look scheduled, else ``None``.
+
+    Scheduled = at least 5 turns, a median gap of 10 minutes or more, and at least
+    half of the gaps within 25% of that median (a timer, not a person typing).
+    """
+    ts = sorted(datetime.fromisoformat(t.replace("Z", "+00:00")) for t in starts if t)
+    gaps = sorted((b - a).total_seconds() for a, b in zip(ts, ts[1:]))
+    if len(gaps) < 4:
+        return None
+    median = gaps[len(gaps) // 2]
+    if median < 600:
+        return None
+    regular = sum(1 for g in gaps if abs(g - median) <= 0.25 * median)
+    return median if regular * 2 >= len(gaps) else None
+
+
 def analyze(conn, ref: str, engine: Optional[str] = None, list_to_real: Optional[float] = None,
             brief_tokens: int = 20_000, top_turns: int = 3, as_of: Optional[date] = None) -> dict:
     s = find_session(conn, ref, engine)
@@ -186,21 +203,35 @@ def analyze(conn, ref: str, engine: Optional[str] = None, list_to_real: Optional
     for e, prompt in zip(ev, prompts):
         carried += min(prompt, turn_base.setdefault(e["turn_index"], prompt))
     carried_pct = 100.0 * carried / sum(prompts) if sum(prompts) else 0.0
+    starts = {}
+    for e in ev:
+        starts.setdefault(e["turn_index"], e["ts"])
+    every = cadence(list(starts.values())) if None not in starts else None
+    span = None
+    if every:
+        span = f"{every / 3600:.0f} hours" if every >= 5400 else ("hour" if every >= 2700 else f"{every / 60:.0f} minutes")
+        fresh_fix = (f"Keep it one task, but make each wake-up (about every {span}) a new session: it reads a "
+                     "state file (goal, decisions so far, open experiments, latest numbers), acts, appends what "
+                     "it decided, and exits. The history lives in the file, not in the context.")
+    else:
+        fresh_fix = ("When a turn moves to a new step, hand off instead of continuing: write a short note of what "
+                     "is decided and what is open, and continue in a new session that starts from it.")
+    if carried_pct < 50:
+        fresh_fix += (" Most context built up within single turns, which a new session does not fix: let "
+                      "sub-agents do the reading and return summaries, so raw tool output never enters this context.")
     candidates = [
         ("push_not_pull", {"drop_poll": True}, "Switch from pull to push while waiting",
          f"{len(poll):,} of {len(ev):,} calls only read the result of a wait ({waits:,}) or a status "
          "check ({:,}), and each re-sent the whole context.".format(len(poll) - waits),
          "Have the work you are waiting on report back (a completion message, hook or notification) "
          "and end the turn, instead of sleeping and re-checking."),
-        ("fresh_session", {"fresh_per_turn": True}, "Start a new session per task",
-         (f"Each call re-sent {sum(prompts) / max(len(prompts), 1) / 1000:,.0f}K of context on average "
-          f"(peak {max(prompts, default=0) / 1000:,.0f}K); {carried_pct:.0f}% of it was carried over from "
-          f"earlier turns, the rest built up within a turn. Simulated: every turn starts fresh from a "
-          f"{brief_tokens // 1000}K-token brief."),
-         ("Keep the state in a ledger or handoff note and start each task in a new session."
-          + (" Most context built up within single turns, which a new session does not fix: let sub-agents "
-             "do the reading and return summaries, so raw tool output never enters this context."
-             if carried_pct < 50 else ""))),
+        ("fresh_session", {"fresh_per_turn": True}, "Start each turn from a brief, not the whole history",
+         (f"The agent was started {len(starts):,} times (by you, a schedule or auto-continue)"
+          + (f", about every {span}" if span else "")
+          + f", and each start re-read every earlier turn. Calls re-sent {sum(prompts) / max(len(prompts), 1) / 1000:,.0f}K "
+          f"of context on average (peak {max(prompts, default=0) / 1000:,.0f}K); {carried_pct:.0f}% of it was "
+          f"carried over from earlier turns. Simulated: every turn starts from a {brief_tokens // 1000}K-token brief."),
+         fresh_fix),
         ("long_context", {"waive_premium": True}, "Stay under the long-context price step",
          f"{premium_calls:,} calls crossed the model's long-context threshold and paid a higher input rate.",
          "Start a new session (or compact) before the context reaches the threshold."),
@@ -225,7 +256,7 @@ def analyze(conn, ref: str, engine: Optional[str] = None, list_to_real: Optional
         "session": {k: s[k] for k in ("engine", "source_session_id", "model_label", "model_id", "project_name",
                                       "started_at", "last_activity_at", "duration_seconds", "compaction_count")},
         "calls": len(ev),
-        "turns": len(turns),
+        "turns": len(starts),
         "list_usd": round(list_cost, 2),
         "real_usd": None if real(list_cost) is None else round(real(list_cost), 2),
         "list_to_real": None if ratio is None else round(ratio, 2),

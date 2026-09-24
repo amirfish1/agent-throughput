@@ -194,6 +194,14 @@ class AnalyzeTests(UsageDbCase):
         self.assertLessEqual(r["score"] + gains, 100)
         self.assertIn("push_not_pull", [f["key"] for f in r["findings"] + r["minor_findings"]])
 
+    def test_cadence_spots_a_timer_not_a_person(self):
+        hourly = [f"2026-09-01T{h:02d}:0{h % 3}:00Z" for h in range(8)]
+        self.assertAlmostEqual(analyze.cadence(hourly), 3600, delta=180)
+        typed = ["2026-09-01T10:00:00Z", "2026-09-01T10:02:00Z", "2026-09-01T11:30:00Z",
+                 "2026-09-01T11:31:00Z", "2026-09-01T15:00:00Z", "2026-09-01T15:09:00Z"]
+        self.assertIsNone(analyze.cadence(typed))
+        self.assertIsNone(analyze.cadence(hourly[:3]))
+
     def test_no_plan_means_no_real_dollars(self):
         r = analyze.analyze(self.conn, "cx")
         self.assertIsNone(r["real_usd"])
