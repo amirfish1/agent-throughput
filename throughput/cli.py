@@ -368,7 +368,7 @@ def _print_analysis(r, st, W):
     print(st(sid[:8], "bold") + st(sid[8:], "grey") + "  " + st(
         f"{s['engine']} · {s['model_label'] or s['model_id'] or '?'} · {s['project_name'] or '-'}", "cyan"))
     print(st(f"{ts(s['started_at'])} → {ts(s['last_activity_at'])} · {_dur(s['duration_seconds'])} · "
-             f"{r['turns']:,} turns · {r['calls']:,} model calls · {s['compaction_count']} compactions", "grey"))
+             f"{r['turns']:,} turns · {r['calls']:,} model calls · {s['compaction_count']} compaction{'' if s['compaction_count'] == 1 else 's'}", "grey"))
 
     print()
     cost = "  " + st("Cost ", "bold") + " " + st(f"{_money(r['list_usd'])} list", "bold")
