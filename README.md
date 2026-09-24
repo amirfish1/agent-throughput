@@ -31,6 +31,7 @@ Python 3.9+.
 
 ```bash
 throughput ingest                                   # read your session stores (a minute cold, seconds after)
+throughput ingest --engine codex --since 2026-09-01 # just one engine, just files touched since a date
 throughput plans add --name claude --engine claude --fee 200 --since 2026-03-11   # what you actually pay
 throughput summary --by month                       # tokens, list $, real $, REAL /MTok, LIST:REAL per engine
 throughput summary --by month --month 2026-08 --by-family        # one month, per model family

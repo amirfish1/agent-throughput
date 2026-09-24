@@ -147,7 +147,10 @@ def cmd_ingest(args):
     conn = _open(args)
     pricing.ensure_rates(conn)
     log = (lambda m: print(m, file=sys.stderr)) if not args.json else (lambda m: None)
-    rep = ingest_mod.ingest(conn, roots, engines, args.full_rebuild, args.dry_run, log)
+    since_ns = None
+    if args.since:
+        since_ns = int(datetime.combine(fees.parse_day(args.since), datetime.min.time()).timestamp() * 1e9)
+    rep = ingest_mod.ingest(conn, roots, engines, args.full_rebuild, args.dry_run, log, since_ns=since_ns)
     if args.json:
         print(json.dumps(rep.as_dict(), indent=2))
         return 0
@@ -159,6 +162,10 @@ def cmd_ingest(args):
     for eng, n in sorted(rep.missing_source_files.items()):
         if n:
             print(f"note: {n} previously ingested {eng} source file(s) no longer exist (rows kept)")
+    for eng, n in sorted(rep.older_files.items()):
+        if n:
+            print(f"note: {n:,} {eng} file(s) last modified before {args.since} were not read; rows already in the "
+                  "DB are kept, files never ingested are missing from totals until an ingest without --since")
     bad = [d for d in rep.details if d[1] in ("failed", "missing_root")]
     for eng, kind, path, reason in bad:
         print(f"  {kind.upper()} [{eng}] {path}: {reason}")
@@ -437,6 +444,7 @@ def build_parser():
     s.add_argument("--engine", type=_engine, action="append", help="limit to an engine (repeatable)")
     s.add_argument("--dry-run", action="store_true", help="parse and report; write nothing")
     s.add_argument("--full-rebuild", action="store_true", help="drop the selected engines' rows and re-ingest")
+    s.add_argument("--since", help="only read files modified on or after this local date, YYYY-MM-DD")
     s.add_argument("--claude-root"); s.add_argument("--codex-root"); s.add_argument("--kimi-root")
     s.add_argument("--json", action="store_true"); s.add_argument("-v", "--verbose", action="store_true")
     s.set_defaults(fn=cmd_ingest)

@@ -23,6 +23,7 @@ class Report:
         self.events_added = 0
         self.duplicate_events_skipped = 0
         self.missing_source_files: Dict[str, int] = defaultdict(int)
+        self.older_files: Dict[str, int] = defaultdict(int)
 
     def note(self, engine, kind, path, reason):
         self.details.append((engine, kind, path, reason))
@@ -33,6 +34,7 @@ class Report:
             "events_added": self.events_added,
             "duplicate_events_skipped": self.duplicate_events_skipped,
             "missing_source_files": dict(self.missing_source_files),
+            "older_files": dict(self.older_files),
             "details": [
                 {"engine": e, "kind": k, "path": p, "reason": r} for e, k, p, r in self.details
             ],
@@ -224,7 +226,9 @@ def ingest(
     dry_run: bool = False,
     log: Callable[[str], None] = lambda _m: None,
     commit_every: int = 200,
+    since_ns: Optional[int] = None,
 ) -> Report:
+    """``since_ns``: leave files last modified before it untouched (rows kept, not re-read)."""
     engines = list(engines or ADAPTERS)
     report = Report()
     ingested_at = _now()
@@ -257,6 +261,9 @@ def ingest(
                 report.note(eng, "skipped", path, reason)
         for sf in adapter.discover(root):
             seen_paths.add(sf.path)
+            if since_ns is not None and sf.mtime_ns < since_ns:
+                report.older_files[eng] += 1
+                continue
             prev = known.get(sf.path)
             if prev and prev["status"] == "ok" and prev["size"] == sf.size and prev["mtime_ns"] == sf.mtime_ns:
                 counts["discovered"] += prev["session_count"]

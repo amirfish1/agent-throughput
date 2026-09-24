@@ -204,6 +204,18 @@ class AnalyzeTests(UsageDbCase):
             analyze.analyze(self.conn, "nope")
 
 
+class IngestSinceTests(UsageDbCase):
+    def test_older_files_are_left_alone(self):
+        path = _rollout(self.codex)
+        os.utime(path, (1_000_000_000, 1_000_000_000))  # 2001
+        rep = self.run_ingest(engines=["codex"], since_ns=int(1.7e18))
+        self.assertEqual(rep.older_files["codex"], 1)
+        self.assertEqual(rep.missing_source_files["codex"], 0)
+        self.assertEqual(self.one("SELECT COUNT(*) n FROM sessions")["n"], 0)
+        self.run_ingest(engines=["codex"])
+        self.assertEqual(self.one("SELECT COUNT(*) n FROM sessions")["n"], 1)
+
+
 class RenderTests(unittest.TestCase):
     def test_bars_and_plain_style(self):
         self.assertEqual(render.bar(0.5, 4), "██  ")
