@@ -57,6 +57,7 @@ The score is 100 × (cost with every fix applied) ÷ (actual cost). Each `+X` is
 ranked above it, so the gains sum to 100 − score. Fixes are simulated on the session's own calls, not estimated from
 averages. Real dollars use your plan's list:real ratio for the months the session ran; pass `--list-to-real 20` if your
 subscription is shared with another machine whose usage this database does not see.
+Output is coloured in a terminal; set `NO_COLOR=1` to turn that off, or use `--json`.
 
 It reads `~/.claude/projects` (Claude Code), `~/.codex/sessions` and `~/.codex/archived_sessions` (Codex) and
 `~/.kimi-code` (Kimi; override with `KIMI_CODE_HOME`). The database is `~/.local/share/throughput/throughput.sqlite3`

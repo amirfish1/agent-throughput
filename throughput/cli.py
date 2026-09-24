@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 
 from . import ingest as ingest_mod
 from . import analyze as analyze_mod
-from . import fees, pricing, queries, schema
+from . import fees, pricing, queries, render, schema
 from .adapters import ADAPTERS
 
 ENGINE_ALIASES = {"claude": "claude_code", "claude-code": "claude_code", "claude_code": "claude_code",
@@ -350,49 +350,75 @@ def cmd_analyze(args):
     if args.json:
         print(json.dumps(r, indent=2, default=str))
         return 0
-    s = r["session"]
-    print(f"{s['source_session_id']}  {s['engine']} · {s['model_label'] or s['model_id'] or '?'}"
-          f" · {s['project_name'] or '-'}")
-    print(f"{(s['started_at'] or '')[:16].replace('T', ' ')} -> {(s['last_activity_at'] or '')[:16].replace('T', ' ')}"
-          f" ({_dur(s['duration_seconds'])}) · {r['turns']:,} turns · {r['calls']:,} model calls"
-          f" · {s['compaction_count']} compactions")
-    cost = f"\nCost: {_money(r['list_usd'])} list"
-    if r["real_usd"] is not None:
-        cost += f" · ≈ {_money(r['real_usd'])} real  ({r['list_to_real']:.1f}:1, {r['ratio_source']})"
-    else:
-        cost += f"  (real $ unknown: {r['ratio_source']}; add a plan or pass --list-to-real)"
-    print(cost)
-    opt = r["optimized"]
-    print(f"Score: {r['score']}/100  (the same work with every fix below would cost {_usd_pair(opt)};"
-          " 100 = no avoidable spend these checks can find)")
-    if r["unpriced_calls"]:
-        print(f"note: {r['unpriced_calls']:,} calls have no price on file and are left out, so dollars are lower bounds")
+    _print_analysis(r, render.Style(render.color_enabled()), render.width())
+    return 0
 
-    print("\nWhere the money went")
-    print_table([{"bucket": b["bucket"], "total_tokens": b["tokens"], "cost_usd": b["list_usd"],
-                  "share": f"{b['share_pct']:.0f}%"} for b in r["breakdown"]], ["bucket", "total_tokens", "cost_usd", "share"])
+
+def _print_analysis(r, st, W):
+    s = r["session"]
+    ts = lambda v: (v or "")[:16].replace("T", " ")  # noqa: E731
+    sid = s["source_session_id"]
+    print(st(sid[:8], "bold") + st(sid[8:], "grey") + "  " + st(
+        f"{s['engine']} · {s['model_label'] or s['model_id'] or '?'} · {s['project_name'] or '-'}", "cyan"))
+    print(st(f"{ts(s['started_at'])} → {ts(s['last_activity_at'])} · {_dur(s['duration_seconds'])} · "
+             f"{r['turns']:,} turns · {r['calls']:,} model calls · {s['compaction_count']} compactions", "grey"))
+
+    print()
+    cost = "  " + st("Cost ", "bold") + " " + st(f"{_money(r['list_usd'])} list", "bold")
+    if r["real_usd"] is not None:
+        cost += "  " + st(f"≈ {_money(r['real_usd'])} real", "bold", "magenta") + st(
+            f"   ({r['list_to_real']:.1f}:1, {r['ratio_source']})", "grey")
+    else:
+        cost += st(f"   (real $ unknown: {r['ratio_source']}; add a plan or pass --list-to-real)", "grey")
+    print(cost)
+    color = render.score_color(r["score"])
+    filled, empty = render.gauge(r["score"] / 100, 30)
+    print("  " + st("Score", "bold") + " " + st(f"{r['score']:>3}", "bold", color) + st("/100", "grey")
+          + "  " + st(filled, color) + st(empty, "grey"))
+    print("  " + st(f"with every fix below: {_usd_pair(r['optimized'])}  "
+                    "(100 = no avoidable spend these checks can find)", "grey"))
+    if r["unpriced_calls"]:
+        print("  " + st(f"note: {r['unpriced_calls']:,} calls have no price on file and are left out, "
+                        "so dollars are lower bounds", "yellow"))
+
+    print("\n" + render.rule("Where the money went", W, st))
+    label_w = max(len(b["bucket"]) for b in r["breakdown"])
+    for b in r["breakdown"]:
+        print(f"  {b['bucket']:<{label_w}}  {_tokens(b['tokens']):>6}  "
+              f"{st(f'{_money(b['list_usd']):>6}', 'bold')}  {st(render.bar(b['share_pct'] / 100, 24), 'blue')}"
+              f" {b['share_pct']:>3.0f}%")
 
     if r["heaviest_turns"]:
-        print("\nHeaviest turns")
-        print_table([{"turn": t["turn"], "started": (t["started"] or "")[:16].replace("T", " "), "calls": t["calls"],
-                      "cost_usd": t["list_usd"], "share": f"{t['share_pct']:.0f}%"} for t in r["heaviest_turns"]])
+        print("\n" + render.rule("Heaviest turns", W, st))
+        for t in r["heaviest_turns"]:
+            print(f"  {st(f'#{t['turn']:<4}', 'bold')} {st(ts(t['started']), 'grey')}  {t['calls']:>5,} calls  "
+                  f"{st(f'{_money(t['list_usd']):>6}', 'bold')}  {st(render.bar(t['share_pct'] / 100, 24), 'blue')}"
+                  f" {t['share_pct']:>3.0f}%")
 
+    print("\n" + render.rule("Fixes", W, st))
     if r["findings"]:
-        print("\nFixes (ranked by savings; each +X is what the fix adds on top of the ones above it)")
+        print("  " + st("ranked by savings · each +X is what the fix adds on top of the ones above it", "grey"))
         for i, f in enumerate(r["findings"], 1):
-            print(f"{i}. {f['title']}  +{f['score_gain']} points  —  alone saves {f['share_pct']:.0f}%"
-                  f" · {_usd_pair(f)}")
-            print(f"   {f['evidence']}")
-            print(f"   Fix: {f['fix']}")
+            gain = f"+{f['score_gain']} points"
+            title = f"{i}. {f['title']}"
+            print()
+            print("  " + st(title, "bold") + " " * max(2, W - 4 - len(title) - len(gain)) + st(gain, "bold", "green"))
+            print("     " + st(f"alone saves {f['share_pct']:.0f}%", "green") + st(f" · {_usd_pair(f)}", "grey"))
+            for line in render.wrap(f["evidence"], 5, W):
+                print("     " + st(line, "dim"))
+            for j, line in enumerate(render.wrap(f["fix"], 11, W)):
+                print("     " + (st("→ Fix: ", "bold", "yellow") if j == 0 else " " * 7) + line)
     else:
-        print(f"\nNo fix would save {analyze_mod.MIN_FINDING_SHARE:.0f}% or more of this session's cost.")
+        print(f"  No fix would save {analyze_mod.MIN_FINDING_SHARE:.0f}% or more of this session's cost.")
     if r["minor_findings"]:
-        print(f"also checked, each under {analyze_mod.MIN_FINDING_SHARE:.0f}%: " + "; ".join(
-            f"{f['title']} ({f['share_pct']:.1f}%)" for f in r["minor_findings"]))
+        print()
+        minor = f"also checked, each under {analyze_mod.MIN_FINDING_SHARE:.0f}%: " + "; ".join(
+            f"{f['title']} ({f['share_pct']:.1f}%)" for f in r["minor_findings"])
+        for line in render.wrap(minor, 2, W):
+            print("  " + st(line, "grey"))
     if not r["labelled"]:
-        print("\nnote: no per-call labels for this session (engine without tool detail, or ingested before "
-              "schema v2); pull/push findings are unavailable")
-    return 0
+        print("\n  " + st("note: no per-call labels for this session (engine without tool detail, or ingested "
+                          "before schema v2); pull/push findings are unavailable", "yellow"))
 
 
 def cmd_sql(args):

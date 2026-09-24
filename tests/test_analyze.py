@@ -7,7 +7,7 @@ import unittest
 
 from test_throughput import UsageDbCase, _claude_msg, _claude_user, _sf, _write
 
-from throughput import actions, analyze, pricing, schema
+from throughput import actions, analyze, pricing, render, schema
 from throughput.adapters import claude_code, codex
 
 
@@ -202,6 +202,20 @@ class AnalyzeTests(UsageDbCase):
     def test_unknown_or_ambiguous_session(self):
         with self.assertRaises(analyze.SessionNotFound):
             analyze.analyze(self.conn, "nope")
+
+
+class RenderTests(unittest.TestCase):
+    def test_bars_and_plain_style(self):
+        self.assertEqual(render.bar(0.5, 4), "██  ")
+        self.assertEqual(render.bar(1 / 32, 4), "▏   ")
+        self.assertEqual(render.bar(2.0, 3), "███")
+        self.assertEqual(render.Style(False)("x", "bold"), "x")
+        self.assertEqual(render.Style(True)("x", "bold", "red"), "\033[1;31mx\033[0m")
+
+    def test_no_color_env_wins(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"NO_COLOR": "1", "FORCE_COLOR": "1"}):
+            self.assertFalse(render.color_enabled())
 
 
 if __name__ == "__main__":
