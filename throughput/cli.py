@@ -378,8 +378,9 @@ def _print_analysis(r, st, W):
     else:
         cost += st(f"   (real $ unknown: {r['ratio_source']}; add a plan or pass --list-to-real)", "grey")
     print(cost)
+    print()
     color = render.score_color(r["score"])
-    filled, empty = render.gauge(r["score"] / 100, 30)
+    filled, empty = render.gauge(r["score"] / 100, 40)
     print("  " + st("Score", "bold") + " " + st(f"{r['score']:>3}", "bold", color) + st("/100", "grey")
           + "  " + st(filled, color) + st(empty, "grey"))
     print("  " + st(f"with every fix below: {_usd_pair(r['optimized'])}  "
@@ -388,28 +389,23 @@ def _print_analysis(r, st, W):
         print("  " + st(f"note: {r['unpriced_calls']:,} calls have no price on file and are left out, "
                         "so dollars are lower bounds", "yellow"))
 
-    print("\n" + render.rule("Where the money went", W, st))
-    label_w = max(len(b["bucket"]) for b in r["breakdown"])
+    print("\n" + render.rule("Cost by token type", W, st))
+    label_w = max([len(b["bucket"]) for b in r["breakdown"]] + [len(x["activity"]) for x in r["activities"]])
     for b in r["breakdown"]:
-        print(f"  {b['bucket']:<{label_w}}  {_tokens(b['tokens']):>6}  "
+        print(f"  {b['bucket']:<{label_w}}  {_tokens(b['tokens']):>6} tokens "
               f"{st(f'{_money(b['list_usd']):>6}', 'bold')}  {st(render.bar(b['share_pct'] / 100, 24), 'blue')}"
               f" {b['share_pct']:>3.0f}%")
 
-    if r["heaviest_turns"]:
-        print("\n" + render.rule("Heaviest turns", W, st))
-        for t in r["heaviest_turns"]:
-            print(f"  {st(f'#{t['turn']:<4}', 'bold')} {st(ts(t['started']), 'grey')}  {t['calls']:>5,} calls  "
-                  f"{st(f'{_money(t['list_usd']):>6}', 'bold')}  {st(render.bar(t['share_pct'] / 100, 24), 'blue')}"
-                  f" {t['share_pct']:>3.0f}%")
-
+    print("\n" + render.rule("Cost by activity", W, st))
+    act_w = label_w
+    for x in r["activities"]:
+        print(f"  {x['activity']:<{act_w}}  {x['calls']:>6,} calls  "
+              f"{st(f'{_money(x['list_usd']):>6}', 'bold')}  {st(render.bar(x['share_pct'] / 100, 24), 'magenta')}"
+              f" {x['share_pct']:>3.0f}%")
     sv = r.get("supervision")
     if sv:
-        print("\n" + render.rule("Managing other agents", W, st))
-        print(f"  handed work to other agents {st(f'{sv['handoffs']:,}', 'bold')} times · "
-              f"{st(f'{sv['steers']:,}', 'bold')} interrupted an agent mid-task · peak "
-              f"{st(sv['peak_per_hour'], 'bold')} in one hour")
-        print(f"  its own work: {st(f'{sv['work_share_pct']:.0f}%', 'bold')} of cost · "
-              f"waiting and checking: {st(f'{sv['poll_share_pct']:.0f}%', 'bold')} of cost")
+        print("  " + st(f"handing work to other agents: {sv['handoffs']:,} hand-offs, {sv['steers']:,} of them "
+                        f"interrupted an agent mid-task, peak {sv['peak_per_hour']} in one hour", "grey"))
 
     print("\n" + render.rule("Fixes", W, st))
     if r["findings"]:

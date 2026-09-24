@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _TABLES = """
 CREATE TABLE IF NOT EXISTS ingest_files (
@@ -272,10 +272,11 @@ _ADDED_COLUMNS = (
 def migrate(conn: sqlite3.Connection) -> int:
     """Create/upgrade the schema; returns the version the DB had before (0 = new).
 
-    Views are always recreated (they hold no data). Upgrading from v1 or v2 forgets
+    Views are always recreated (they hold no data). Upgrading from v1-v3 forgets
     which files were ingested, so the next ingest re-reads them all and fills the
     per-call ``turn_index``/``action`` labels (v1 had none; v3 added
-    ``dispatch``/``steer`` and counts log-reading scripts as status checks).
+    ``dispatch``/``steer`` and counts log-reading scripts as status checks; v4 split
+    ``work`` into ``read``/``edit``/``test``/``run``).
     """
     have = conn.execute("PRAGMA user_version").fetchone()[0]
     if have > SCHEMA_VERSION:
@@ -287,7 +288,7 @@ def migrate(conn: sqlite3.Connection) -> int:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
-    if have in (1, 2):
+    if have in (1, 2, 3):
         conn.execute("DELETE FROM ingest_files")
     conn.executescript(_VIEWS)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

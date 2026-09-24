@@ -33,7 +33,7 @@ stores: `ingest --full-rebuild` recreates every row.
 | `breakeven --fee N` | Second-subscription comparison; the candidate fee is an input, never assumed. Also reports your current real $/MTok and list:real. |
 | `plans add --name --engine --fee [--since D] [--until D]` / `plans` | Record subscription fees you actually pay. Same `--name` updates the plan in place (how you set its dates). `--since` inclusive, `--until` exclusive, `YYYY-MM-DD`; USD only. |
 | `rates [load --file F]` | Show or load the price table. |
-| `analyze SESSION [--engine E] [--list-to-real X] [--brief TOKENS] [--as-of T] [--json]` | One session: cost breakdown, heaviest turns, a 0–100 score and ranked fixes with their saving in % of cost, list $ and real $. `SESSION` is an id or unique prefix. See [Session analysis](#session-analysis). |
+| `analyze SESSION [--engine E] [--list-to-real X] [--brief TOKENS] [--as-of T] [--json]` | One session: cost by token type and by activity, a 0–100 score and ranked fixes with their saving in % of cost, list $ and real $. `SESSION` is an id or unique prefix. See [Session analysis](#session-analysis). |
 | `sql "SELECT ..."` | Read-only SQL. |
 
 ## Verified store formats
@@ -93,13 +93,14 @@ messages) and `duration_seconds`. Quality columns: `usage_complete`,
 tokens, model, timestamp, source file). Sessions are aggregates of it; per-model
 pricing, mid-session model changes and day/week/month buckets use it.
 Schema v2 added `turn_index` (which incoming human message the call answers) and
-`action` (`wait` | `status` | `dispatch` | `steer` | `work` | NULL: what the call read — see
+`action` (what the call read — see
 [Session analysis](#session-analysis)). Only the label is stored, never the
 command.
 
-Migrating a v1 or v2 database adds any missing columns and forgets
+Migrating a v1, v2 or v3 database adds any missing columns and forgets
 `ingest_files`, so the next `ingest` re-reads every file once and refreshes the
-labels (v3 added `dispatch`/`steer`). Existing rows are updated in place.
+labels (v3 added `dispatch`/`steer`). Migrating v3 does the same: v4 split `work`
+into `read`/`edit`/`test`/`git`/`ops`/`run`. Existing rows are updated in place.
 
 `price_rates`, `subscription_plans`, `ingest_files`, `meta`, and the views
 `event_costs`, `session_costs`, `cost_by_day`, `cost_by_month`,
@@ -176,29 +177,39 @@ what each fix would have saved on those exact calls.
 **Action labels.** Each call is labelled by the tool calls whose results it
 read (the ones the previous call made, in the same turn):
 `wait` = only sleeps/waits; `status` = only waits and read-only status checks
-(process lists, log tails, `git status/log/fetch`, CI/PR/queue status, `curl`
-without a body, inline Python that only reads logs or transcripts or prints
-file tails); `dispatch` = handed work to another agent (`ccc send/spawn/ask`,
-`wt add`, Codex `spawn_agent`/`send_message`, Claude Code's Task tool);
-`steer` = a dispatch that interrupted a running agent (`ccc send --steer`);
-`work` = anything else. When a call read several kinds, steer > dispatch >
-work > status > wait. The first call of a turn reads a human message and has no label. The
-labels are heuristic; misses default to `work`.
+(process lists, log tails, read-only `git`, `systemctl status`, CI/PR/queue
+status, `curl` without a body, inline Python that only reads logs, local APIs or
+databases); `dispatch` = handed work to another agent (`ccc send/spawn/ask`,
+`wt add`, also from inline scripts, Codex `spawn_agent`/`send_message`, Claude
+Code's Task tool); `steer` = a dispatch that interrupted a running agent
+(`ccc send --steer`). The agent's own work is split into `read` (search and read
+code, docs, the web), `edit` (patches, Edit/Write, `sed -i`, scripts that write
+files), `test` (tests, type checks, linters), `git` (commit, push, merge, ...),
+`ops` (`ssh`, `sudo`, service managers, deploy CLIs) and `run` (anything else).
+Inline Python is labelled by what it does: the program it starts, then file
+writes, network sends, status reads, plain reads. When a call read several kinds:
+steer > dispatch > edit > test > git > ops > run > read > status > wait. The
+first call of a turn reads a human message and has no label. The labels are
+heuristic; misses default to `run`.
+
+**Cost by activity.** Every priced call's cost goes to one activity, named after
+its label (`dispatch` and `steer` share "handing work to other agents"; unlabelled
+first calls are "reading messages and replying"), so the rows sum to the
+session's cost. Heaviest turns are in `--json` only.
 
 **Fixes simulated.**
 - *Switch from pull to push* — drop every `wait`/`status` call.
-- *Start a new session per task* — each turn after the first starts from a
+- *Start each turn from a brief* — each turn after the first starts from a
   brief (`--brief`, default 20,000 tokens) instead of the carried context; the
   first call of a turn pays its brief uncached. The evidence line says how much
   of the context was carried over from earlier turns; when under half, most of
   it built up within one turn and the fix suggests delegating to sub-agents.
 - *Delegate the checking, not just the building* — only for sessions that
   handed work to other agents 5+ times (a supervisor). Every stretch of 3+
-  consecutive `work` calls becomes a sub-agent job that starts from the brief,
+  consecutive own-work calls becomes a sub-agent job that starts from the brief,
   when that is cheaper than doing it in place. The supervisor's own calls are
   priced as they happened, so the saving is conservative. Such sessions also get
-  a "Managing other agents" section: hand-offs, steers, peak hand-offs per hour,
-  and the cost shares of its own work and of waiting/checking.
+  a note under the activity table: hand-offs, steers and peak hand-offs per hour.
 - *Stay under the long-context threshold* — waive the premium above.
 
 Fixes saving under 5% are listed on one line as minor.

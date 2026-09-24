@@ -21,11 +21,28 @@ class ActionLabelTests(unittest.TestCase):
             "API=http://x ccc status abc": "status",
             "gh run watch 123": "status",
             "curl -s http://127.0.0.1/api/health": "status",
-            "curl -s -X POST http://127.0.0.1/api/x": "work",
-            "rg -n needle src": "work",
+            "curl -s -X POST http://127.0.0.1/api/x": "run",
+            "rg -n needle src": "read",
+            "cd /repo && python3 -m pytest -q": "test",
+            "node tests/app.test.cjs": "test",
+            "sed -n 1,40p tests/test_x.py": "read",
+            "cat > notes.md <<EOF": "edit",
+            "git commit -m x": "git",
+            "git -c credential.helper=x push origin main": "git",
+            "git -C repo ls-remote origin": "status",
+            "ssh host uptime": "ops",
+            "sudo -n systemctl restart app": "ops",
+            "sudo -n systemctl show app": "status",
+            "python3 - <<'PY'\nsubprocess.run(['/opt/bin/ccc', 'spawn', '--name', 'x'])\nPY": "dispatch",
+            "python3 - <<'PY'\nsubprocess.run(['git', 'push'])\nPY": "git",
             "python3 - <<'PY'\nfor s in p.read_text().splitlines()[-3:]:\n print(s)\nPY": "status",
-            "python3 - <<'PY'\nopen('x', 'w').write('1')\nPY": "work",
-            "": "work",
+            "python3 - <<'PY'\nopen('x', 'w').write('1')\nPY": "edit",
+            "python3 - <<'PY'\nimport subprocess\nsubprocess.run(['make'])\nPY": "run",
+            "python3 - <<'PY'\nimport subprocess\nsubprocess.run(['wt', 'add', 'Q'])\nPY": "dispatch",
+            "python3 - <<'PY'\nimport urllib.request\nurllib.request.urlopen('http://h/api/version')\nPY": "status",
+            "python3 - <<'PY'\nurlopen(Request(u, data=b'x', method='POST'))\nPY": "run",
+            "python3 - <<'PY'\nimport json\nprint(json.load(open('a.json')))\nPY": "read",
+            "": "run",
         }
         for cmd, want in cases.items():
             self.assertEqual(actions.tool_label("shell", cmd), want, cmd)
@@ -36,8 +53,8 @@ class ActionLabelTests(unittest.TestCase):
             "/r/ccc send --steer --json --from abc worker-1 'stop'": "steer",
             "ccc --server http://h:1 ask s 'q?'": "dispatch",
             "wt add QUEUE 'task'": "dispatch",
-            "ccc spawn --help": "work",
-            "cat SKILL.md && wt add --help": "work",
+            "ccc spawn --help": "run",
+            "cat SKILL.md && wt add --help": "read",
             "ccc sessions": "status",
             "python3 - <<'PY'\nfor l in open('/x/worker.jsonl'): print(l)\nPY": "status",
         }
@@ -45,17 +62,20 @@ class ActionLabelTests(unittest.TestCase):
             self.assertEqual(actions.tool_label("shell", cmd), want, cmd)
         self.assertEqual(actions.tool_label("Task"), "dispatch")
         self.assertEqual(actions.tool_label("spawn_agent"), "dispatch")
-        self.assertEqual(actions.combine(["work", "dispatch"]), "dispatch")
+        self.assertEqual(actions.combine(["edit", "dispatch"]), "dispatch")
         self.assertEqual(actions.combine(["dispatch", "steer", "wait"]), "steer")
 
     def test_tools_and_combine(self):
         self.assertEqual(actions.tool_label("sleep"), "wait")
         self.assertEqual(actions.tool_label("TaskOutput"), "status")
-        self.assertEqual(actions.tool_label("Edit"), "work")
+        self.assertEqual(actions.tool_label("Edit"), "edit")
+        self.assertEqual(actions.tool_label("Read"), "read")
+        self.assertEqual(actions.tool_label("TodoWrite"), "run")
         self.assertIsNone(actions.combine([]))
         self.assertEqual(actions.combine(["wait", "wait"]), "wait")
         self.assertEqual(actions.combine(["wait", "status"]), "status")
-        self.assertEqual(actions.combine(["status", "work"]), "work")
+        self.assertEqual(actions.combine(["status", "read"]), "read")
+        self.assertEqual(actions.combine(["read", "edit", "test"]), "edit")
 
 
 def _u(inp, cached, out=100):
@@ -99,14 +119,14 @@ def _rollout(codex_root, sid="cx1"):
 class CodexLabelTests(UsageDbCase):
     def test_actions_are_what_each_call_read_and_turns_count_messages(self):
         [ps] = codex.parse(_sf("codex", _rollout(self.codex)))
-        self.assertEqual([e.action for e in ps.events], [None, "wait", "work", None])
+        self.assertEqual([e.action for e in ps.events], [None, "wait", "read", None])
         self.assertEqual([e.turn_index for e in ps.events], [0, 0, 0, 1])
 
     def test_labels_are_stored(self):
         _rollout(self.codex)
         self.run_ingest(engines=["codex"])
         rows = self.conn.execute("SELECT turn_index, action FROM usage_events ORDER BY id").fetchall()
-        self.assertEqual([tuple(r) for r in rows], [(0, None), (0, "wait"), (0, "work"), (1, None)])
+        self.assertEqual([tuple(r) for r in rows], [(0, None), (0, "wait"), (0, "read"), (1, None)])
 
 
 class ClaudeLabelTests(UsageDbCase):
@@ -128,7 +148,7 @@ class ClaudeLabelTests(UsageDbCase):
             _claude_msg("m4", "claude-sonnet-5", "2026-09-01T10:00:08.000Z"),
         ])
         [ps] = claude_code.parse(_sf("claude_code", p))
-        self.assertEqual([e.action for e in ps.events], [None, "wait", "work", None])
+        self.assertEqual([e.action for e in ps.events], [None, "wait", "read", None])
         self.assertEqual([e.turn_index for e in ps.events], [1, 1, 1, 2])
 
 
@@ -220,6 +240,12 @@ class AnalyzeTests(UsageDbCase):
                              analyze.simulate(ev, fresh_per_turn=True))
         # the fixture has one work call in a row: too short to brief an agent for
         self.assertAlmostEqual(analyze.simulate(ev, delegate_work=True), full)
+
+    def test_activities_slice_the_whole_cost(self):
+        r = analyze.analyze(self.conn, "cx", list_to_real=20)
+        self.assertAlmostEqual(sum(a["list_usd"] for a in r["activities"]), r["list_usd"], places=1)
+        names = {a["activity"] for a in r["activities"]}
+        self.assertEqual(names, {"reading messages and replying", "waiting (sleep)", "reading and searching code"})
 
     def test_no_supervision_section_without_handoffs(self):
         r = analyze.analyze(self.conn, "cx", list_to_real=20)

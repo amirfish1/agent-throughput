@@ -20,6 +20,22 @@ from . import actions, fees
 
 # Only findings at or above this share of list cost are reported.
 MIN_FINDING_SHARE = 5.0
+# What a call was doing, from its label (see actions.py). None = it read a new message, or
+# the previous call made no tool calls: reading and replying.
+ACTIVITY_OF = {
+    actions.READ: "reading and searching code",
+    actions.EDIT: "editing code",
+    actions.TEST: "testing and checks",
+    actions.GIT: "committing and pushing (git)",
+    actions.OPS: "servers and deploys (ssh, sudo, services)",
+    actions.RUN: "running scripts and commands",
+    actions.WORK: "own work (not split: re-ingest)",
+    actions.DISPATCH: "handing work to other agents",
+    actions.STEER: "handing work to other agents",
+    actions.STATUS: "checking on progress",
+    actions.WAIT: "waiting (sleep)",
+    None: "reading messages and replying",
+}
 MIN_JOB_CALLS = 3  # shorter stretches of own work are not worth briefing an agent for
 MIN_HANDOFFS = 5  # a session that hands work to other agents this often is supervising
 
@@ -142,7 +158,7 @@ def simulate(events: list, drop_poll: bool = False, fresh_per_turn: bool = False
         first = e["turn_index"] != turn
         if first:
             turn, base = e["turn_index"], prompt
-        if job and (first or e["action"] != actions.WORK):
+        if job and (first or e["action"] not in actions.WORK_ACTIONS):
             close_job()
         if drop_poll and e["action"] in actions.POLL_ACTIONS:
             continue
@@ -153,7 +169,7 @@ def simulate(events: list, drop_poll: bool = False, fresh_per_turn: bool = False
             p = _parts(e, cr=max(0, cr - (prompt - replay)))
         else:
             p = _parts(e)
-        if delegate_work and e["action"] == actions.WORK:
+        if delegate_work and e["action"] in actions.WORK_ACTIONS:
             if not job:
                 job_base = prompt
                 d = _parts(e, inp=max(inp, min(prompt, brief_tokens) - cc), cr=0)
@@ -214,6 +230,15 @@ def analyze(conn, ref: str, engine: Optional[str] = None, list_to_real: Optional
     ]
     breakdown = [dict(bucket=b, tokens=t, **money(c)) for b, t, c in buckets if t]
 
+    # The same 100% sliced by what each call was doing (the tool results it read).
+    acts = {}
+    for e, p in priced:
+        a = ACTIVITY_OF.get(e["action"], ACTIVITY_OF[None])
+        acts.setdefault(a, [0, 0.0])
+        acts[a][0] += 1
+        acts[a][1] += _cost(p)
+    activities = [dict(activity=a, calls=n, **money(usd)) for a, (n, usd) in sorted(acts.items(), key=lambda kv: -kv[1][1])]
+
     turns = {}
     for e, p in priced:
         t = turns.setdefault(e["turn_index"], {"turn": e["turn_index"], "started": e["ts"], "calls": 0, "usd": 0.0})
@@ -241,7 +266,7 @@ def analyze(conn, ref: str, engine: Optional[str] = None, list_to_real: Optional
     per_hour = {}
     for e in handoffs:
         per_hour[e["ts"][:13]] = per_hour.get(e["ts"][:13], 0) + 1
-    work_usd = sum(_cost(p) for e, p in priced if e["action"] == actions.WORK)
+    work_usd = sum(_cost(p) for e, p in priced if e["action"] in actions.WORK_ACTIONS)
     poll_usd = sum(_cost(p) for e, p in priced if e["action"] in actions.POLL_ACTIONS)
     supervising = len(handoffs) >= MIN_HANDOFFS
     supervision = None if not handoffs else {
@@ -319,6 +344,7 @@ def analyze(conn, ref: str, engine: Optional[str] = None, list_to_real: Optional
         "score": score,
         "optimized": money(optimized),
         "breakdown": breakdown,
+        "activities": activities,
         "heaviest_turns": heaviest,
         "supervision": supervision,
         "findings": findings,

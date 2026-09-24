@@ -45,14 +45,22 @@ throughput analyze 01a0c969                         # where one session's money 
 
 ### Why was that session so expensive?
 
-`throughput analyze <session-id-prefix>` breaks one session's cost into fresh input, cache reads, cache writes and
-output, lists its heaviest turns, and ranks fixes by the money each would have saved:
+`throughput analyze <session-id-prefix>` slices one session's whole cost two ways: by token type (cache reads,
+fresh input, cache writes, output) and by what the agent was doing (reading code, checking on progress, handing work
+to other agents, waiting, editing, servers and deploys, git, tests, ...). Then it ranks fixes by the money each would
+have saved:
 
 ```
-Score: 39/100
+Score  38/100
+COST BY ACTIVITY
+  reading and searching code                    436 calls     $70   27%
+  checking on progress                          352 calls     $57   22%
+  handing work to other agents                  231 calls     $35   14%
+  ...
+FIXES
 1. Start each turn from a brief, not the whole history   +32 points — alone saves 46% · $118 list · ≈ $5.88 real
-2. Switch from pull to push while waiting                +22 points — alone saves 26% · $66 list · ≈ $3.29 real
-3. Delegate the checking, not just the building           +7 points — alone saves 22% · $55 list · ≈ $2.77 real
+2. Switch from pull to push while waiting                +25 points — alone saves 30% · $78 list · ≈ $3.88 real
+3. Delegate the checking, not just the building           +5 points — alone saves 13% · $33 list · ≈ $1.66 real
 ```
 
 The score is 100 × (cost with every fix applied) ÷ (actual cost). Each `+X` is what that fix adds on top of the fixes
@@ -77,8 +85,9 @@ It reads `~/.claude/projects` (Claude Code), `~/.codex/sessions` and `~/.codex/a
   proportion to list cost. That assumes quota is consumed in proportion to list price, which no provider guarantees.
 - **`analyze` labels are heuristics.** A call counts as polling when every tool call it read was a sleep or a read-only
   status check (`git status`, `tail`, `gh run view`, reading a log, ...). Hand-offs to other agents are recognised for
-  CCC, WatchTower, Codex multi-agent tools and Claude Code's Task tool. Unusual commands count as work, so the push/pull
-  saving is a lower bound.
+  CCC, WatchTower, Codex multi-agent tools and Claude Code's Task tool, including inline scripts that call them.
+  Activities come from command patterns, not a model, so they are free, deterministic and private. Unusual commands
+  count as "running scripts and commands", so the push/pull saving is a lower bound.
 - **Cache reads dominate token counts** (about 97% for heavy Claude Code use), which is why REAL /MTok is small. Compare
   LIST:REAL across engines instead.
 
