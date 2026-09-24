@@ -404,8 +404,10 @@ def _print_analysis(r, st, W):
               f" {x['share_pct']:>3.0f}%")
     sv = r.get("supervision")
     if sv:
-        print("  " + st(f"handing work to other agents: {sv['handoffs']:,} hand-offs, {sv['steers']:,} of them "
-                        f"interrupted an agent mid-task, peak {sv['peak_per_hour']} in one hour", "grey"))
+        note = (f"handing work to other agents: {sv['handoffs']:,} hand-offs, {sv['steers']:,} of them "
+                f"interrupted an agent mid-task, peak {sv['peak_per_hour']} in one hour")
+        for line in render.wrap(note, 2, W):
+            print("  " + st(line, "grey"))
 
     print("\n" + render.rule("Fixes", W, st))
     if r["findings"]:
