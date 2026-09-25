@@ -28,7 +28,7 @@ If none works, tell the user to run `pipx install git+https://github.com/amirfis
 - "my last session", "the expensive one yesterday": first list candidates with
   `<cmd> sessions --order "cost_usd DESC" --limit 10 --since YYYY-MM-DD` and pick, or ask.
 
-It reads new session logs into its database before analyzing. The first run takes about a minute; tell the user
+It reads new session logs into its database before analyzing. The first run takes a minute or two; tell the user
 before you start it. Later runs take seconds.
 
 ## 3. Report it

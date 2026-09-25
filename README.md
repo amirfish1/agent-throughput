@@ -25,7 +25,7 @@ uvx --from git+https://github.com/amirfish1/agent-throughput throughput analyze 
 ```
 
 Run it from inside Claude Code (type `!` first) to analyze the session you are in; anywhere else it picks your most
-recent session, or pass a session id. The first run reads your session logs into a local database (about a minute);
+recent session, or pass a session id. The first run reads your session logs into a local database (a minute or two);
 after that it takes seconds. Nothing leaves your machine.
 
 ```
@@ -61,7 +61,7 @@ Python 3.9+.
 ## Use
 
 ```bash
-throughput ingest                                   # read your session stores (a minute cold, seconds after)
+throughput ingest                                   # read your session stores (a minute or two cold, seconds after)
 throughput ingest --engine codex --since 2026-09-01 # just one engine, just files touched since a date
 throughput plans add --name claude --engine claude --fee 200 --since 2026-03-11   # what you actually pay
 throughput summary --by month                       # tokens, list $, real $, REAL /MTok, LIST:REAL per engine

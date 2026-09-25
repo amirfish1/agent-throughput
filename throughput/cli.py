@@ -350,14 +350,14 @@ def _usd_pair(d):
 def _refreshed(args):
     """Open the DB after an incremental ingest, so the session being asked about is current.
 
-    The first run reads every store (about a minute); later runs only re-read changed files
+    The first run reads every store (a minute or two); later runs only re-read changed files
     (seconds). The whole store is read, not just this session, because real dollars come
     from the month's total list cost against your fee.
     """
     if args.no_ingest:
         return _open(args, True)
     if not os.path.exists(args.db or default_db_path()):
-        print("first run: reading your session logs into a local database (about a minute) ...", file=sys.stderr)
+        print("first run: reading your session logs into a local database (a minute or two) ...", file=sys.stderr)
     conn = _open(args)
     pricing.ensure_rates(conn)
     try:
