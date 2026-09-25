@@ -347,17 +347,90 @@ def _usd_pair(d):
     return f"{_money(d['list_usd'])} list{real}"
 
 
-def cmd_analyze(args):
-    conn = _open(args, True)
+def _refreshed(args):
+    """Open the DB after an incremental ingest, so the session being asked about is current.
+
+    The first run reads every store (about a minute); later runs only re-read changed files
+    (seconds). The whole store is read, not just this session, because real dollars come
+    from the month's total list cost against your fee.
+    """
+    if args.no_ingest:
+        return _open(args, True)
+    if not os.path.exists(args.db or default_db_path()):
+        print("first run: reading your session logs into a local database (about a minute) ...", file=sys.stderr)
+    conn = _open(args)
+    pricing.ensure_rates(conn)
     try:
-        r = analyze_mod.analyze(conn, args.session, args.engine, args.list_to_real, args.brief,
+        ingest_mod.ingest(conn, {}, [args.engine] if args.engine else None)
+    except sqlite3.OperationalError as exc:  # e.g. another ingest holds the lock: analyze what is there
+        conn.rollback()
+        print(f"note: could not refresh the database ({exc}); using what it already has", file=sys.stderr)
+    return conn
+
+
+def _latest_session(conn, engine=None):
+    row = conn.execute("SELECT source_session_id FROM sessions WHERE is_subagent = 0"
+                       + (" AND engine = ?" if engine else "")
+                       + " ORDER BY last_activity_at DESC LIMIT 1", ([engine] if engine else [])).fetchone()
+    if not row:
+        sys.exit("no sessions in the database yet")
+    return row["source_session_id"]
+
+
+def cmd_analyze(args):
+    conn = _refreshed(args)
+    ref = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID") or _latest_session(conn, args.engine)
+    try:
+        r = analyze_mod.analyze(conn, ref, args.engine, args.list_to_real, args.brief,
                                 as_of=fees.parse_day(args.as_of) if args.as_of else None)
     except analyze_mod.SessionNotFound as exc:
         sys.exit(str(exc))
     if args.json:
         print(json.dumps(r, indent=2, default=str))
         return 0
-    _print_analysis(r, render.Style(render.color_enabled()), render.width())
+    st = render.Style(render.color_enabled())
+    (_print_short if args.short else _print_analysis)(r, st, render.width())
+    return 0
+
+
+def _print_short(r, st, W):
+    """The analysis in a few lines: cost, score, and each fix as % of spend and dollars."""
+    s = r["session"]
+    print(st(s["source_session_id"][:8], "bold") + "  " + st(
+        f"{s['engine']} · {s['model_label'] or s['model_id'] or '?'} · {s['project_name'] or '-'} · "
+        f"{_dur(s['duration_seconds'])}", "cyan"))
+    usd = lambda d: f"{_money(d['list_usd'])} list" + (  # noqa: E731
+        f" ≈ {_money(d['real_usd'])} real" if d.get("real_usd") is not None else "")
+    score = "score n/a (no priced calls)" if r["score"] is None else f"score {r['score']}/100"
+    print(f"{usd(r)} · {score}")
+    for i, f in enumerate(r["findings"], 1):
+        for j, line in enumerate(render.wrap(f"{i}. {f['title']}: {f['share_pct']:.0f}% of spend ({usd(f)})", 3, W)):
+            print(("" if j == 0 else "   ") + line)
+    if r["score"] is not None and not r["findings"]:
+        print(f"no fix would save {analyze_mod.MIN_FINDING_SHARE:.0f}% or more")
+    if r["unpriced_calls"]:
+        print(st(f"note: {r['unpriced_calls']:,} calls have no price on file; dollars are lower bounds", "yellow"))
+
+
+SKILL_SOURCE = os.path.join(os.path.dirname(__file__), "skill", "SKILL.md")
+
+
+def cmd_install_skill(args):
+    """Copy the packaged Claude Code skill into a skills directory."""
+    dest_dir = os.path.join(os.path.expanduser(args.dir), "session-waste")
+    dest = os.path.join(dest_dir, "SKILL.md")
+    with open(SKILL_SOURCE, encoding="utf-8") as fh:
+        text = fh.read()
+    if os.path.exists(dest) and not args.force:
+        with open(dest, encoding="utf-8") as fh:
+            if fh.read() == text:
+                print(f"already installed: {dest}")
+                return 0
+        sys.exit(f"{dest} exists and differs; pass --force to overwrite it")
+    os.makedirs(dest_dir, exist_ok=True)
+    with open(dest, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    print(f"installed {dest}\nIn Claude Code, type /session-waste (or ask \"where did this session's tokens go?\").")
     return 0
 
 
@@ -379,12 +452,16 @@ def _print_analysis(r, st, W):
         cost += st(f"   (real $ unknown: {r['ratio_source']}; add a plan or pass --list-to-real)", "grey")
     print(cost)
     print()
-    color = render.score_color(r["score"])
-    filled, empty = render.gauge(r["score"] / 100, 40)
-    print("  " + st("Score", "bold") + " " + st(f"{r['score']:>3}", "bold", color) + st("/100", "grey")
-          + "  " + st(filled, color) + st(empty, "grey"))
-    print("  " + st(f"with every fix below: {_usd_pair(r['optimized'])}  "
-                    "(100 = no avoidable spend these checks can find)", "grey"))
+    if r["score"] is None:
+        print("  " + st("Score", "bold") + " " + st("n/a", "bold") + st(
+            "  no call in this session has a price on file, so there is nothing to score", "grey"))
+    else:
+        color = render.score_color(r["score"])
+        filled, empty = render.gauge(r["score"] / 100, 40)
+        print("  " + st("Score", "bold") + " " + st(f"{r['score']:>3}", "bold", color) + st("/100", "grey")
+              + "  " + st(filled, color) + st(empty, "grey"))
+        print("  " + st(f"with every fix below: {_usd_pair(r['optimized'])}  "
+                        "(100 = no avoidable spend these checks can find)", "grey"))
     if r["unpriced_calls"]:
         print("  " + st(f"note: {r['unpriced_calls']:,} calls have no price on file and are left out, "
                         "so dollars are lower bounds", "yellow"))
@@ -502,14 +579,25 @@ def build_parser():
     s.add_argument("--file"); s.set_defaults(fn=cmd_rates)
 
     s = sub.add_parser("analyze", help="why one session cost what it did, and what would have been cheaper")
-    s.add_argument("session", help="session id or a unique prefix of it")
+    s.add_argument("session", nargs="?",
+                   help="session id or a unique prefix of it (default: the Claude Code session this runs in, "
+                   "from $CLAUDE_CODE_SESSION_ID, else your most recent session)")
     s.add_argument("--engine", type=_engine)
+    s.add_argument("--no-ingest", action="store_true",
+                   help="analyze the DB as it is; by default new and changed session logs are read in first")
+    s.add_argument("--short", action="store_true", help="a few lines: cost, score, and each fix's share and dollars")
     s.add_argument("--list-to-real", type=float, metavar="X",
                    help="LIST:REAL ratio to convert list $ to real $ (default: from your plans and this DB)")
     s.add_argument("--brief", type=int, default=20_000, metavar="TOKENS",
                    help="summary size a fresh session would start from in the what-if (default 20000)")
     s.add_argument("--as-of", help="end of the fee period for the real ratio (YYYY-MM-DD, default today)")
     s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_analyze)
+
+    s = sub.add_parser("install-skill", help="install the /session-waste skill for Claude Code")
+    s.add_argument("--dir", default=os.path.join("~", ".claude", "skills"),
+                   help="skills directory (default ~/.claude/skills; use .claude/skills for one project)")
+    s.add_argument("--force", action="store_true", help="overwrite a changed copy")
+    s.set_defaults(fn=cmd_install_skill)
 
     s = sub.add_parser("sql", help="run a read-only SQL query")
     s.add_argument("query"); s.set_defaults(fn=cmd_sql)

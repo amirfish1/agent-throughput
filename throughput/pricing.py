@@ -9,29 +9,32 @@ from typing import Optional
 PACKAGED_RATES = os.path.join(os.path.dirname(__file__), "rates.json")
 
 
-def load_rates(conn, path: Optional[str] = None) -> int:
+def load_rates(conn, path: Optional[str] = None, only_missing: bool = False) -> int:
     """Upsert rate rows from a JSON file (default: the packaged ``rates.json``).
 
     Rows are keyed by ``(pricing_key, effective_from)``, so re-loading is
     idempotent and a new effective date adds history instead of overwriting.
+    ``only_missing`` adds rows the table lacks and leaves existing ones as they are.
+    Returns the number of rows written.
     """
     path = path or PACKAGED_RATES
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
     n = 0
     for r in doc.get("rates", []):
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO price_rates (provider, pricing_key, effective_from, effective_to, currency, "
             "unit, input_rate, cache_read_rate, cache_write_5m_rate, cache_write_1h_rate, output_rate, "
             "source_note, verified_at, long_context_threshold, long_context_multiplier) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            + ("ON CONFLICT(pricing_key, effective_from) DO NOTHING" if only_missing else
             "ON CONFLICT(pricing_key, effective_from) DO UPDATE SET "
             "provider=excluded.provider, effective_to=excluded.effective_to, currency=excluded.currency, "
             "unit=excluded.unit, input_rate=excluded.input_rate, cache_read_rate=excluded.cache_read_rate, "
             "cache_write_5m_rate=excluded.cache_write_5m_rate, cache_write_1h_rate=excluded.cache_write_1h_rate, "
             "output_rate=excluded.output_rate, source_note=excluded.source_note, verified_at=excluded.verified_at, "
             "long_context_threshold=excluded.long_context_threshold, "
-            "long_context_multiplier=excluded.long_context_multiplier",
+            "long_context_multiplier=excluded.long_context_multiplier"),
             (
                 r.get("provider"), r["pricing_key"], r.get("effective_from", "1970-01-01"),
                 r.get("effective_to"), r.get("currency", "USD"), r.get("unit", "per_1m_tokens"),
@@ -40,7 +43,7 @@ def load_rates(conn, path: Optional[str] = None) -> int:
                 (r.get("long_context") or {}).get("above"), (r.get("long_context") or {}).get("multiplier"),
             ),
         )
-        n += 1
+        n += cur.rowcount
     conn.commit()
     return n
 
@@ -68,6 +71,7 @@ def backfill_long_context(conn, path: Optional[str] = None) -> int:
 
 
 def ensure_rates(conn) -> None:
-    """Seed the packaged rates the first time (empty table only)."""
-    if conn.execute("SELECT COUNT(*) FROM price_rates").fetchone()[0] == 0 and os.path.exists(PACKAGED_RATES):
-        load_rates(conn)
+    """Seed the packaged rates: all of them the first time, then only models the table lacks
+    (a model added in a new release gets priced; rates you loaded or edited are kept)."""
+    if os.path.exists(PACKAGED_RATES):
+        load_rates(conn, only_missing=True)

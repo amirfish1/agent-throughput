@@ -2,12 +2,16 @@
 
 Fixtures are tiny synthetic transcripts with fake ids; no real conversation content.
 """
+import contextlib
+import io
+import json
 import os
 import unittest
+from unittest import mock
 
 from test_throughput import UsageDbCase, _claude_msg, _claude_user, _sf, _write
 
-from throughput import actions, analyze, pricing, render, schema
+from throughput import actions, analyze, cli, pricing, render, schema
 from throughput.adapters import claude_code, codex
 
 
@@ -268,6 +272,102 @@ class AnalyzeTests(UsageDbCase):
     def test_unknown_or_ambiguous_session(self):
         with self.assertRaises(analyze.SessionNotFound):
             analyze.analyze(self.conn, "nope")
+
+    def test_full_id_is_not_ambiguous_with_its_subagents(self):
+        self.conn.execute("INSERT INTO sessions (engine, source_session_id, provider, ingested_at) "
+                          "SELECT engine, 'cx1:agent-a1', provider, ingested_at FROM sessions")
+        self.assertEqual(analyze.find_session(self.conn, "cx1")["source_session_id"], "cx1")
+        with self.assertRaises(analyze.SessionNotFound):
+            analyze.find_session(self.conn, "cx")
+
+
+class OneCommandTests(UsageDbCase):
+    """``throughput analyze`` from nothing: it reads the logs in, and picks the session by itself."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.tmp, "home")
+        _rollout(os.path.join(self.home, ".codex"))
+        self.db = os.path.join(self.tmp, "fresh", "t.sqlite3")
+        env = {"HOME": self.home, "KIMI_CODE_HOME": os.path.join(self.home, "none"), "NO_COLOR": "1"}
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+
+    def run_cli(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["--db", self.db, *argv])
+        return code, out.getvalue()
+
+    def test_first_run_ingests_and_defaults_to_the_latest_session(self):
+        code, out = self.run_cli("analyze", "--json")
+        self.assertEqual(code, 0)
+        r = json.loads(out)
+        self.assertEqual(r["session"]["source_session_id"], "cx1")
+        self.assertIsNotNone(r["score"])  # the packaged rates price gpt-6-astra
+
+    def test_current_claude_session_wins_and_short_names_each_fix(self):
+        _rollout(os.path.join(self.home, ".codex"), sid="cx2")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "cx1"
+        code, out = self.run_cli("analyze", "--short")
+        self.assertEqual(code, 0)
+        self.assertTrue(out.startswith("cx1"), out)
+        self.assertRegex(out, r"score \d+/100")
+
+    def test_short_spells_out_share_and_dollars(self):
+        r = {"session": {"source_session_id": "abcdef123", "engine": "claude_code", "model_label": "Opus 5",
+                         "model_id": None, "project_name": "p", "duration_seconds": 3600},
+             "list_usd": 118.0, "real_usd": 5.9, "score": 38, "unpriced_calls": 0,
+             "findings": [{"title": "Switch from pull to push while waiting", "share_pct": 30.2,
+                           "list_usd": 35.0, "real_usd": 1.75}]}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli._print_short(r, render.Style(False), 100)
+        self.assertEqual(out.getvalue().splitlines()[1:], [
+            "$118 list ≈ $5.90 real · score 38/100",
+            "1. Switch from pull to push while waiting: 30% of spend ($35 list ≈ $1.75 real)"])
+
+    def test_no_ingest_needs_a_database(self):
+        with self.assertRaises(SystemExit):
+            self.run_cli("analyze", "--no-ingest")
+
+    def test_install_skill_is_idempotent_and_will_not_clobber_edits(self):
+        skills = os.path.join(self.tmp, "skills")
+        self.assertEqual(self.run_cli("install-skill", "--dir", skills)[0], 0)
+        path = os.path.join(skills, "session-waste", "SKILL.md")
+        with open(path, encoding="utf-8") as fh:
+            self.assertIn("name: session-waste", fh.read())
+        self.assertIn("already installed", self.run_cli("install-skill", "--dir", skills)[1])
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("local edit\n")
+        with self.assertRaises(SystemExit):
+            self.run_cli("install-skill", "--dir", skills)
+        self.assertEqual(self.run_cli("install-skill", "--dir", skills, "--force")[0], 0)
+
+
+class UnpricedTests(UsageDbCase):
+    def test_nothing_priced_means_no_score_not_a_perfect_one(self):
+        _rollout(self.codex)
+        self.run_ingest(engines=["codex"])  # no rate rows at all
+        r = analyze.analyze(self.conn, "cx")
+        self.assertIsNone(r["score"])
+        self.assertEqual((r["findings"], r["minor_findings"]), ([], []))
+        self.assertEqual(r["unpriced_calls"], 4)
+
+
+class RateTopUpTests(UsageDbCase):
+    def test_new_packaged_models_are_added_and_edited_rates_kept(self):
+        pricing.ensure_rates(self.conn)
+        n = self.one("SELECT COUNT(*) n FROM price_rates")["n"]
+        self.conn.execute("UPDATE price_rates SET input_rate = 99 WHERE pricing_key = 'claude-sonnet-5'")
+        self.conn.execute("DELETE FROM price_rates WHERE pricing_key = 'claude-opus-5-5'")
+        self.conn.commit()
+        pricing.ensure_rates(self.conn)
+        self.assertEqual(self.one("SELECT COUNT(*) n FROM price_rates")["n"], n)
+        self.assertEqual(self.one("SELECT input_rate FROM price_rates WHERE pricing_key = 'claude-sonnet-5'")[0], 99)
+        self.assertEqual(self.one("SELECT output_rate FROM price_rates WHERE pricing_key = 'claude-opus-5-5'")[0], 20.0)
 
 
 class IngestSinceTests(UsageDbCase):

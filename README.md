@@ -18,6 +18,37 @@ period   engine       calls   total_tokens  cache read %  list $  real $  list /
 
 Standard library only. Your logs are **only read**; conversation text is never copied into the database.
 
+## Where did my session's tokens go? (one command)
+
+```bash
+uvx --from git+https://github.com/amirfish1/agent-throughput throughput analyze --short
+```
+
+Run it from inside Claude Code (type `!` first) to analyze the session you are in; anywhere else it picks your most
+recent session, or pass a session id. The first run reads your session logs into a local database (about a minute);
+after that it takes seconds. Nothing leaves your machine.
+
+```
+01a0c969  codex · GPT-6 astra · watchtower · 35h45m
+$255 list ≈ $13 real · score 38/100
+1. Start each turn from a brief, not the whole history: 46% of spend ($118 list ≈ $5.88 real)
+2. Switch from pull to push while waiting: 30% of spend ($78 list ≈ $3.88 real)
+3. Delegate the checking, not just the building: 13% of spend ($33 list ≈ $1.66 real)
+```
+
+Drop `--short` for the full breakdown (below). "real" needs your plan fee once:
+`throughput plans add --name claude --engine claude --fee 200 --since 2026-03-11`.
+
+### As a Claude Code skill: `/session-waste`
+
+```bash
+pipx install git+https://github.com/amirfish1/agent-throughput
+throughput install-skill          # writes ~/.claude/skills/session-waste/SKILL.md
+```
+
+Then type `/session-waste` in any Claude Code session (or ask "where did this session's tokens go?"). Claude runs the
+analysis and reports each fix as a share of the session's spend, in list and real dollars.
+
 ## Install
 
 ```bash
@@ -41,6 +72,8 @@ throughput breakeven --fee 200                      # would a second $200 plan p
 throughput sessions --order "cost_usd DESC" --limit 10
 throughput sql "SELECT * FROM cost_by_month"        # read-only SQL over the views
 throughput analyze 01a0c969                         # where one session's money went, and what would have saved it
+throughput analyze --short                          # this Claude Code session (or your latest), in a few lines
+throughput install-skill                            # add /session-waste to Claude Code
 ```
 
 ### Why was that session so expensive?
@@ -63,7 +96,10 @@ FIXES
 3. Delegate the checking, not just the building           +5 points — alone saves 13% · $33 list · ≈ $1.66 real
 ```
 
-The score is 100 × (cost with every fix applied) ÷ (actual cost). Each `+X` is what that fix adds on top of the fixes
+`analyze` reads new and changed session logs first (skip that with `--no-ingest`). With no id it analyzes
+`$CLAUDE_CODE_SESSION_ID` (the Claude Code session it runs in), else your most recent session.
+The score is 100 × (cost with every fix applied) ÷ (actual cost); a session whose model has no price on file gets
+no score rather than 100. Each `+X` is what that fix adds on top of the fixes
 ranked above it, so the gains sum to 100 − score. Fixes are simulated on the session's own calls, not estimated from
 averages. Real dollars use your plan's list:real ratio for the months the session ran; pass `--list-to-real 20` if your
 subscription is shared with another machine whose usage this database does not see.

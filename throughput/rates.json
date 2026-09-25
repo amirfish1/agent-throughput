@@ -40,6 +40,18 @@
   },
   {
    "provider": "anthropic",
+   "pricing_key": "claude-opus-5-5",
+   "effective_from": "1970-01-01",
+   "input": 4.0,
+   "cache_read": 0.2,
+   "cache_write_5m": 5.0,
+   "cache_write_1h": 8.0,
+   "output": 20.0,
+   "source_note": "seeded from published list prices (Claude API docs, checked 2026-09-25: $4 input, $20 output, $0.20 cache read); effective date unknown so applied to all time; cache_write_5m = 1.25x input and cache_write_1h = 2x input (factors taken from the verified rows)",
+   "verified_at": null
+  },
+  {
+   "provider": "anthropic",
    "pricing_key": "claude-opus-5",
    "effective_from": "1970-01-01",
    "input": 5.0,

@@ -45,9 +45,15 @@ class SessionNotFound(LookupError):
 
 
 def find_session(conn, ref: str, engine: Optional[str] = None) -> dict:
-    """The one session whose source id starts with ``ref``."""
+    """The one session whose source id is ``ref`` or starts with it.
+
+    An exact id wins over longer ones it prefixes (a session's sub-agents are ``<id>:agent-...``).
+    """
     sql = "SELECT * FROM sessions WHERE source_session_id LIKE ?" + (" AND engine = ?" if engine else "")
     rows = conn.execute(sql + " ORDER BY started_at LIMIT 6", (ref + "%", *([engine] if engine else []))).fetchall()
+    exact = [r for r in rows if r["source_session_id"] == ref]
+    if len(exact) == 1:
+        rows = exact
     if not rows:
         raise SessionNotFound(f"no session id starts with {ref!r}")
     if len(rows) > 1:
@@ -319,10 +325,11 @@ def analyze(conn, ref: str, engine: Optional[str] = None, list_to_real: Optional
     applicable.sort(key=lambda c: alone[c[0]])
     optimized = sim(**{k: v for c in applicable for k, v in c[1].items()}) if applicable else list_cost
     score_of = lambda cost: round(100.0 * optimized / cost) if cost > 0 else 100  # noqa: E731
-    score = score_of(list_cost)
+    # Nothing priced (no rate on file for the model) means nothing to score, not a perfect score.
+    score = score_of(list_cost) if list_cost > 0 else None
 
     findings, minor, flags, prev = [], [], {}, score
-    for key, fl, title, evidence, fix in applicable:
+    for key, fl, title, evidence, fix in (applicable if score is not None else []):
         flags.update(fl)
         now = score_of(sim(**flags))
         f = dict(key=key, title=title, score_gain=now - prev, evidence=evidence, fix=fix,
