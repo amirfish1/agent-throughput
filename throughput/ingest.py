@@ -87,6 +87,7 @@ def _upsert_session(conn, ps: ParsedSession, sf: SourceFile, ingested_at: str):
         (ps.engine, ps.source_session_id),
     ).fetchone()
     fields = dict(
+        machine="local",  # a local file is the source of truth, even for a row an earlier merge brought in
         provider=ps.provider,
         parent_source_session_id=ps.parent_source_session_id,
         is_subagent=int(ps.is_subagent),
@@ -234,8 +235,10 @@ def ingest(
     ingested_at = _now()
     if full_rebuild:
         for eng in engines:
-            conn.execute("DELETE FROM usage_events WHERE engine=?", (eng,))
-            conn.execute("DELETE FROM sessions WHERE engine=?", (eng,))
+            # Only this machine's rows: sessions merged from other machines have no local files to re-read.
+            conn.execute("DELETE FROM usage_events WHERE session_id IN "
+                         "(SELECT id FROM sessions WHERE engine=? AND machine='local')", (eng,))
+            conn.execute("DELETE FROM sessions WHERE engine=? AND machine='local'", (eng,))
             conn.execute("DELETE FROM ingest_files WHERE engine=?", (eng,))
     dirty: set = set()
     since_commit = 0

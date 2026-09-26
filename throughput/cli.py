@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 
 from . import ingest as ingest_mod
 from . import analyze as analyze_mod
-from . import fees, pricing, queries, render, schema
+from . import fees, pricing, queries, remote, render, schema
 from .adapters import ADAPTERS
 
 ENGINE_ALIASES = {"claude": "claude_code", "claude-code": "claude_code", "claude_code": "claude_code",
@@ -195,15 +195,18 @@ def cmd_sessions(args):
     sub = {"exclude": False, "only": True, "include": None}[args.subagents]
     since, until = _month_range(args)
     rows = queries.list_sessions(conn, args.engine, args.provider, args.model, args.project,
-                                 since, until, sub, args.order, args.limit)
+                                 since, until, sub, args.order, args.limit, machine=args.machine)
     if args.json:
         print(json.dumps(rows, indent=2, default=str))
         return 0
     for r in rows:
         r["started"] = (r["started_at"] or "")[:16]
         r["sid"] = r["source_session_id"][:14]
-    print_table(rows, ["engine", "sid", "started", "model_label", "project_name", "message_count",
-                       "total_tokens", "cost_usd", "unpriced_event_count"])
+    cols = ["engine", "sid", "started", "model_label", "project_name", "message_count",
+            "total_tokens", "cost_usd", "unpriced_event_count"]
+    if any(r.get("machine", "local") != "local" for r in rows):
+        cols.insert(1, "machine")
+    print_table(rows, cols)
     return 0
 
 
@@ -435,6 +438,47 @@ def _print_analysis(r, st, W):
                           "before schema v2); pull/push findings are unavailable", "yellow"))
 
 
+def _snapshot_dir(args):
+    return os.path.join(os.path.dirname(args.db or default_db_path()), "machines")
+
+
+def _print_merge(stats, machine):
+    print(f"merged machine '{machine}': {stats['inserted']:,} new sessions, {stats['refreshed']:,} refreshed, "
+          f"{stats['unchanged']:,} unchanged")
+    if stats["kept_other"]:
+        print(f"  {stats['kept_other']:,} sessions also exist on another machine with at least as many events; "
+              "kept that copy")
+    print(f"  usage events added: {stats['events_added']:,}"
+          + (f"; {stats['events_duplicate']:,} already held by another session" if stats["events_duplicate"] else ""))
+
+
+def cmd_merge(args):
+    conn = _open(args)
+    stats = remote.merge(conn, args.path, args.machine, lambda m: print(m, file=sys.stderr))
+    if args.json:
+        print(json.dumps(stats, indent=2)); return 0
+    _print_merge(stats, args.machine)
+    return 0
+
+
+def cmd_pull(args):
+    conn = _open(args)
+    pricing.ensure_rates(conn)
+    machine = args.machine or args.host
+    try:
+        stats = remote.pull(conn, args.host, users=args.user, since=args.since, engines=args.engine,
+                            machine=machine, snapshot_dir=_snapshot_dir(args),
+                            log=lambda m: print(m, file=sys.stderr))
+    except Exception as exc:  # ssh/scp/remote failures: one line, not a traceback
+        print(f"pull failed: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(stats, indent=2)); return 0
+    _print_merge(stats, machine)
+    print(f"  snapshot kept at {stats['snapshot']}")
+    return 0
+
+
 def cmd_sql(args):
     conn = _open(args, True)
     conn.execute("PRAGMA query_only = ON")
@@ -462,6 +506,7 @@ def build_parser():
     s.add_argument("--month", help="one calendar month, YYYY-MM (instead of --since/--until)")
     s.add_argument("--subagents", choices=["exclude", "only", "include"], default="exclude")
     s.add_argument("--order", default="started_at DESC"); s.add_argument("--limit", type=int, default=30)
+    s.add_argument("--machine", help="only sessions from this machine ('local' = this one)")
     s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_sessions)
 
     s = sub.add_parser("summary", help="tokens and cost by day/week/month/engine")
@@ -510,6 +555,20 @@ def build_parser():
                    help="summary size a fresh session would start from in the what-if (default 20000)")
     s.add_argument("--as-of", help="end of the fee period for the real ratio (YYYY-MM-DD, default today)")
     s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_analyze)
+
+    s = sub.add_parser("pull", help="ingest on another machine over ssh and merge its usage into this DB")
+    s.add_argument("host", help="ssh host (as in ~/.ssh/config)")
+    s.add_argument("--user", action="append",
+                   help="read this account's session stores on the host (repeatable; sudo -n when it isn't the "
+                        "ssh user); default: the ssh user's own")
+    s.add_argument("--machine", help="name to tag its sessions with (default: the host)")
+    s.add_argument("--since", help="host ingest reads only files modified on or after this date, YYYY-MM-DD")
+    s.add_argument("--engine", type=_engine, action="append", help="limit to an engine (repeatable)")
+    s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_pull)
+
+    s = sub.add_parser("merge", help="merge another throughput DB file into this one, tagged with a machine name")
+    s.add_argument("path"); s.add_argument("--machine", required=True)
+    s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_merge)
 
     s = sub.add_parser("sql", help="run a read-only SQL query")
     s.add_argument("query"); s.set_defaults(fn=cmd_sql)

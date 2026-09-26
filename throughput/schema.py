@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _TABLES = """
 CREATE TABLE IF NOT EXISTS ingest_files (
@@ -66,6 +66,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     usage_complete              INTEGER NOT NULL DEFAULT 1,
     model_known                 INTEGER NOT NULL DEFAULT 0,
     warning                     TEXT,
+    -- Where the session ran: 'local' for this machine's own stores, else the
+    -- name given to 'throughput pull' / 'throughput merge' (e.g. an ssh host).
+    machine                     TEXT NOT NULL DEFAULT 'local',
     UNIQUE (engine, source_session_id)
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
@@ -189,7 +192,7 @@ FROM (
 DROP VIEW IF EXISTS session_costs;
 CREATE VIEW session_costs AS
 SELECT
-    s.id AS session_id, s.engine, s.provider, s.source_session_id, s.model_id,
+    s.id AS session_id, s.engine, s.machine, s.provider, s.source_session_id, s.model_id,
     s.model_label, s.project_name, s.is_subagent, s.started_at, s.last_activity_at,
     s.message_count, s.duration_seconds, s.total_tokens,
     COUNT(c.event_id) AS event_count,
@@ -266,6 +269,7 @@ _ADDED_COLUMNS = (
     ("usage_events", "action", "TEXT"),
     ("price_rates", "long_context_threshold", "INTEGER"),
     ("price_rates", "long_context_multiplier", "REAL"),
+    ("sessions", "machine", "TEXT NOT NULL DEFAULT 'local'"),
 )
 
 

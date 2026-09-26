@@ -31,6 +31,7 @@ def list_sessions(
     subagents: Optional[bool] = False,
     order="started_at DESC",
     limit=50,
+    machine=None,
 ):
     """Session list with cost. ``subagents``: False = top-level only, True = sub-agents only, None = both."""
     where, args = [], []
@@ -48,6 +49,8 @@ def list_sessions(
         where.append("s.started_at < ?"); args.append(until)
     if subagents is not None:
         where.append("s.is_subagent = ?"); args.append(int(subagents))
+    if machine:
+        where.append("s.machine = ?"); args.append(machine)
     allowed = {"started_at": "s.started_at", "total_tokens": "s.total_tokens", "cost_usd": "c.cost_usd",
                "message_count": "s.message_count", "duration_seconds": "s.duration_seconds"}
     col, _, direction = order.partition(" ")
@@ -55,7 +58,7 @@ def list_sessions(
         raise ValueError(f"bad order: {order!r}")
     col = allowed[col]
     sql = (
-        "SELECT s.id, s.engine, s.provider, s.source_session_id, s.is_subagent, s.model_id, s.model_label, "
+        "SELECT s.id, s.engine, s.machine, s.provider, s.source_session_id, s.is_subagent, s.model_id, s.model_label, "
         "s.model_count, s.project_name, s.started_at, s.last_activity_at, s.message_count, "
         "s.duration_seconds, s.input_tokens, s.cache_read_input_tokens, s.cache_creation_input_tokens, "
         "s.output_tokens, s.total_tokens, s.compaction_count, s.usage_complete, s.warning, "
