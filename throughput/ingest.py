@@ -335,7 +335,9 @@ def ingest(
                 conn.commit()
                 log(f"  ... {eng}: {sum(counts[c] for c in ('inserted','updated','unchanged'))} sessions so far")
                 since_commit = 0
-        report.missing_source_files[eng] = len(set(known) - seen_paths)
+        # Only files under this root: another root (a second user's store) is not "missing".
+        under = os.path.join(os.path.abspath(root), "")
+        report.missing_source_files[eng] = len({p for p in known if p.startswith(under)} - seen_paths)
     for sid in dirty:  # sessions that lost duplicated events to an earlier session
         _refresh_aggregates(conn, sid, _stored_warnings(conn, sid))
     _link_parents(conn)
