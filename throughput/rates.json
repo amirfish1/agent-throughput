@@ -52,6 +52,18 @@
   },
   {
    "provider": "anthropic",
+   "pricing_key": "claude-opus-5-5",
+   "effective_from": "1970-01-01",
+   "input": 4.0,
+   "cache_read": 0.2,
+   "cache_write_5m": 5.0,
+   "cache_write_1h": 8.0,
+   "output": 20.0,
+   "source_note": "published list price $4/$20 per MTok, cache reads $0.20 (Claude API skill model table, 2026-09); cache writes 1.25x/2x input as for the other Claude models",
+   "verified_at": "2026-09-26"
+  },
+  {
+   "provider": "anthropic",
    "pricing_key": "claude-opus-4-8",
    "effective_from": "1970-01-01",
    "input": 5.0,
@@ -143,7 +155,10 @@
    "cache_write_5m": null,
    "cache_write_1h": null,
    "output": 50.0,
-   "long_context": {"above": 272000, "multiplier": 2.0},
+   "long_context": {
+    "above": 272000,
+    "multiplier": 2.0
+   },
    "source_note": "seeded from published list prices (checked 2026-07..09); effective date unknown so applied to all time; long_context: prompts over 272K input tokens pay 2x input and cached-input rates, output unchanged (published pricing as reported 2026-09-24, not yet verified here)",
    "verified_at": null
   },
