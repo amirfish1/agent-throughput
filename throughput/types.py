@@ -47,6 +47,7 @@ class ParsedSession:
     parent_source_session_id: Optional[str] = None
     is_subagent: bool = False
     agent_label: Optional[str] = None
+    agent_type: Optional[str] = None  # Claude Code: the launching Task/Agent call's subagent_type
     working_directory: Optional[str] = None
     git_branch: Optional[str] = None
     started_at: Optional[str] = None

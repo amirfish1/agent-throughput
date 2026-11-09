@@ -46,6 +46,21 @@ def _claude_user(ts, text="hi", sid="s1"):
     return {"type": "user", "timestamp": ts, "sessionId": sid, "message": {"role": "user", "content": text}}
 
 
+def _claude_launch(tool_use_id, subagent_type=None, name="Task", ts="2026-09-01T10:00:06.000Z"):
+    inp = {"description": "SECRET-DESCRIPTION", "prompt": "SECRET-PROMPT"}
+    if subagent_type is not None:
+        inp["subagent_type"] = subagent_type
+    return {"type": "assistant", "timestamp": ts, "sessionId": "s1", "uuid": f"u-{tool_use_id}",
+            "message": {"id": f"m-{tool_use_id}", "model": "claude-sonnet-5", "usage": {"output_tokens": 1},
+                        "content": [{"type": "tool_use", "id": tool_use_id, "name": name, "input": inp}]}}
+
+
+def _claude_launch_result(tool_use_id, agent_id, ts="2026-09-01T10:00:09.000Z"):
+    return {"type": "user", "timestamp": ts, "sessionId": "s1", "toolUseResult": {"agentId": agent_id},
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id,
+                                                      "content": "SECRET-RESULT"}]}}
+
+
 class UsageDbCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="usage-db-test-")
@@ -195,6 +210,57 @@ class ClaudeAdapterTests(UsageDbCase):
         self.assertEqual((top["output_tokens"], sub["output_tokens"]), (5, 7))  # not folded together
         self.assertEqual([r["id"] for r in queries.list_sessions(self.conn, subagents=None)].count(sub["id"]), 1)
         self.assertEqual(len(queries.list_sessions(self.conn)), 1)  # default = top-level only
+
+    def _write_launched_subagents(self):
+        proj = os.path.join(self.claude, "proj")
+        _write(os.path.join(proj, "s1.jsonl"), [
+            _claude_user("2026-09-01T10:00:00.000Z"),
+            _claude_launch("tu-1", "Explore"),
+            _claude_launch("tu-2", "general-purpose", name="Agent"),
+            _claude_launch("tu-3"),
+            _claude_launch("tu-4", "  " + "x" * 100 + "  "),
+            _claude_launch_result("tu-1", "aaa"),
+            _claude_launch_result("tu-2", "bbb"),
+            _claude_launch_result("tu-3", "ccc"),
+            _claude_launch_result("tu-4", "ddd"),
+        ])
+        for n, agent in enumerate(("aaa", "bbb", "ccc", "ddd", "eee")):
+            _write(os.path.join(proj, "s1", "subagents", f"agent-{agent}.jsonl"),
+                   [_claude_msg(f"sub{n}", "claude-haiku-4-5-20251001", "2026-09-01T10:00:07.000Z")])
+
+    def agent_types(self):
+        return {r["agent_label"]: r["agent_type"]
+                for r in self.conn.execute("SELECT agent_label, agent_type FROM sessions WHERE is_subagent=1")}
+
+    def test_subagent_type_comes_from_the_launching_tool_use(self):
+        self._write_launched_subagents()
+        self.run_ingest(engines=["claude_code"])
+        types = self.agent_types()
+        self.assertEqual((types["agent-aaa"], types["agent-bbb"]), ("Explore", "general-purpose"))
+        self.assertIsNone(types["agent-ccc"])  # launched without a subagent_type
+        self.assertEqual(types["agent-ddd"], "x" * 64)  # stripped and capped
+        self.assertIsNone(types["agent-eee"])  # no launching call in the parent
+        self.assertIsNone(self.one("SELECT agent_type FROM sessions WHERE is_subagent=0")["agent_type"])
+
+    def test_running_subagent_is_typed_through_its_meta_file(self):
+        proj = os.path.join(self.claude, "proj")
+        _write(os.path.join(proj, "s1.jsonl"), [_claude_user("2026-09-01T10:00:00.000Z"), _claude_launch("tu-1", "Plan")])
+        _write(os.path.join(proj, "s1", "subagents", "agent-zzz.jsonl"), [_claude_msg("m1", "claude-sonnet-5", "2026-09-01T10:00:07.000Z")])
+        _write(os.path.join(proj, "s1", "subagents", "agent-zzz.meta.json"), [{"toolUseId": "tu-1", "description": "SECRET-DESCRIPTION"}])
+        self.run_ingest(engines=["claude_code"])
+        self.assertEqual(self.agent_types(), {"agent-zzz": "Plan"})
+
+    def test_subagent_type_survives_reingest_and_leaks_no_tool_input(self):
+        self._write_launched_subagents()
+        self.run_ingest(engines=["claude_code"])
+        before = self.agent_types()
+        self.run_ingest(engines=["claude_code"])
+        self.run_ingest(engines=["claude_code"], full_rebuild=True)
+        self.assertEqual(self.agent_types(), before)
+        self.conn.commit()
+        dump = "\n".join(self.conn.iterdump())
+        for secret in ("SECRET-PROMPT", "SECRET-DESCRIPTION", "SECRET-RESULT"):
+            self.assertNotIn(secret, dump)
 
     def test_corrupt_line_is_reported_not_fatal(self):
         p = os.path.join(self.claude, "proj", "s1.jsonl")

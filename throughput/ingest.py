@@ -72,7 +72,7 @@ _FINGERPRINT_COLS = (
     "input_tokens, cache_read_input_tokens, cache_creation_input_tokens, output_tokens, "
     "reasoning_tokens, usage_event_count, compaction_count, usage_complete, warning, "
     "last_activity_at, status, project_name, git_branch, parent_source_session_id, "
-    "source_format_version, raw_metadata_json"
+    "agent_type, source_format_version, raw_metadata_json"
 )
 
 
@@ -92,6 +92,7 @@ def _upsert_session(conn, ps: ParsedSession, sf: SourceFile, ingested_at: str):
         parent_source_session_id=ps.parent_source_session_id,
         is_subagent=int(ps.is_subagent),
         agent_label=ps.agent_label,
+        agent_type=ps.agent_type,
         project_name=_project_name(ps.working_directory),
         working_directory=ps.working_directory,
         git_branch=ps.git_branch,
