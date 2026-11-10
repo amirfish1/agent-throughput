@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _TABLES = """
 CREATE TABLE IF NOT EXISTS ingest_files (
@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     parent_source_session_id    TEXT,
     is_subagent                 INTEGER NOT NULL DEFAULT 0,
     agent_label                 TEXT,
+    agent_type                  TEXT,              -- Claude Code sub-agents: the launching call's subagent_type
     -- Dominant model = the one with most output tokens; all models are in
     -- usage_events and model_count says whether the session mixed models.
     model_id                    TEXT,
@@ -270,17 +271,19 @@ _ADDED_COLUMNS = (
     ("price_rates", "long_context_threshold", "INTEGER"),
     ("price_rates", "long_context_multiplier", "REAL"),
     ("sessions", "machine", "TEXT NOT NULL DEFAULT 'local'"),
+    ("sessions", "agent_type", "TEXT"),
 )
 
 
 def migrate(conn: sqlite3.Connection) -> int:
     """Create/upgrade the schema; returns the version the DB had before (0 = new).
 
-    Views are always recreated (they hold no data). Upgrading from v1-v3 forgets
+    Views are always recreated (they hold no data). Upgrading from v1-v5 forgets
     which files were ingested, so the next ingest re-reads them all and fills the
     per-call ``turn_index``/``action`` labels (v1 had none; v3 added
     ``dispatch``/``steer`` and counts log-reading scripts as status checks; v4 split
-    ``work`` into ``read``/``edit``/``test``/``run``).
+    ``work`` into ``read``/``edit``/``test``/``run``; v6 added ``sessions.agent_type``,
+    which only a re-read of the sub-agent files can fill).
     """
     have = conn.execute("PRAGMA user_version").fetchone()[0]
     if have > SCHEMA_VERSION:
@@ -292,7 +295,7 @@ def migrate(conn: sqlite3.Connection) -> int:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
-    if have in (1, 2, 3):
+    if have in (1, 2, 3, 4, 5):
         conn.execute("DELETE FROM ingest_files")
     conn.executescript(_VIEWS)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

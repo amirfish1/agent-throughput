@@ -102,6 +102,13 @@ Migrating a v1, v2 or v3 database adds any missing columns and forgets
 labels (v3 added `dispatch`/`steer`). Migrating v3 does the same: v4 split `work`
 into `read`/`edit`/`test`/`git`/`ops`/`run`. Existing rows are updated in place.
 
+Schema v6 added `sessions.agent_type`: for a Claude Code sub-agent, the
+`subagent_type` of the `Task`/`Agent` call that launched it (e.g. `Explore`,
+`general-purpose`), trimmed and capped at 64 characters. It is NULL for top-level
+sessions, other engines, and sub-agents whose launching call has no type. Only that
+string is stored, never the prompt or description. Migrating v4 or v5 forgets
+`ingest_files` too, so the next `ingest` fills the column.
+
 `price_rates`, `subscription_plans`, `ingest_files`, `meta`, and the views
 `event_costs`, `session_costs`, `cost_by_day`, `cost_by_month`,
 `cost_by_engine_model`.

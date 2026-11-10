@@ -172,6 +172,25 @@ class LongContextPricingTests(UsageDbCase):
 
 
 class MigrationTests(unittest.TestCase):
+    def test_v5_db_gains_agent_type_keeps_rows_and_forgets_files(self):
+        import tempfile
+        d = tempfile.mkdtemp(prefix="usage-db-mig-")
+        conn = schema.connect(os.path.join(d, "v5.sqlite3"))
+        line = "    agent_type                  TEXT,              -- Claude Code sub-agents: the launching call's subagent_type\n"
+        self.assertIn(line, schema._TABLES)
+        conn.executescript(schema._TABLES.replace(line, ""))
+        conn.execute("PRAGMA user_version = 5")
+        conn.execute("INSERT INTO sessions (engine, source_session_id, is_subagent, ingested_at) VALUES ('claude_code', 's1:agent-a', 1, 'now')")
+        conn.execute("INSERT INTO ingest_files VALUES ('/x', 'claude_code', 1, 1, 1, 0, 'ok', NULL, 'now')")
+        conn.commit()
+        self.assertEqual(schema.migrate(conn), 5)
+        self.assertEqual(schema.SCHEMA_VERSION, 6)
+        row = conn.execute("SELECT source_session_id, agent_type FROM sessions").fetchone()
+        self.assertEqual((row["source_session_id"], row["agent_type"]), ("s1:agent-a", None))
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM ingest_files").fetchone()[0], 0)  # re-read to fill it
+        self.assertEqual(schema.migrate(conn), schema.SCHEMA_VERSION)
+        conn.close()
+
     def test_v1_db_gains_columns_forgets_files_and_gets_premiums(self):
         import tempfile
         d = tempfile.mkdtemp(prefix="usage-db-mig-")
